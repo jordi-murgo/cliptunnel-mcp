@@ -52,45 +52,58 @@ CT1|<from>|<to>|<seq>|<type>|<payload>
 ## Installation
 
 ```bash
-pip install cliptunnel-mcp          # core: Controller, Agent, protocol, operations
-pip install cliptunnel-mcp[server]  # adds the MCP server (mcp>=1.2,<2)
+pip install cliptunnel-mcp          # core + cliptunnel-agent binary
+pip install cliptunnel-mcp[server]  # adds cliptunnel-mcp server binary (mcp>=1.2,<2)
 ```
+
+Both modes install console entry points:
+
+| Binary              | Extra needed | Purpose                                      |
+|---------------------|--------------|----------------------------------------------|
+| `cliptunnel-agent`  | *(none)*     | Runs the Agent on the local OS clipboard.    |
+| `cliptunnel-mcp`    | `[server]`   | Runs the MCP server over stdio.              |
 
 ## Quick start
 
-Run the Agent on the locked-down machine and the Controller + MCP server on the operator's machine. Both sides need a `Transport` implementation wired to the real clipboard.
-
 ### Agent (remote machine)
 
-```python
-from cliptunnel_mcp import Agent
-from cliptunnel_mcp.operations import dispatch
+The simplest way to run the Agent is the installed binary:
 
-# ClipboardTransport is your bridge to the OS clipboard.
-agent = Agent(transport=clipboard_transport, handler=dispatch)
-# The Agent watches the slot, ACKs commands, processes them, and writes responses.
+```bash
+cliptunnel-agent
 ```
+
+This builds a `ClipboardTransport` backed by the system clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `xclip`/`xsel` on Linux) and wires `operations.dispatch` as the command handler. The Agent watches the clipboard slot, ACKs commands, processes them in a worker pool, and writes responses back. Press `Ctrl+C` to stop.
 
 ### Controller + MCP server (operator machine)
 
-```python
-from cliptunnel_mcp import Controller
-from cliptunnel_mcp.server import set_controller, create_server
+On the operator side, configure your MCP client (Claude Desktop, Cursor, Pi, etc.) to launch the server binary:
 
-controller = Controller(transport=clipboard_transport)
-set_controller(controller)
-
-# Run the MCP server over stdio for Claude Desktop, Pi, Cursor, etc.
-create_server().run(transport="stdio")
+```json
+{
+  "mcpServers": {
+    "cliptunnel": {
+      "command": "cliptunnel-mcp",
+      "args": []
+    }
+  }
+}
 ```
+
+The server binary injects a `Controller` backed by a `ClipboardTransport` and runs the FastMCP application over stdio. All `remote_*` tools are available immediately.
+
+> **Note**: the MCP server requires `pip install cliptunnel-mcp[server]`.
 
 ### Controller only (no MCP)
 
+For programmatic use without an MCP client:
+
 ```python
+from cliptunnel_mcp.clipboard_transport import ClipboardTransport
 from cliptunnel_mcp import Controller
 import json
 
-controller = Controller(transport=clipboard_transport)
+controller = Controller(transport=ClipboardTransport())
 
 # Async — returns a Future
 future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}))
@@ -98,6 +111,19 @@ result = future.result(timeout=30)
 
 # Sync — blocks until response or timeout
 output = controller.send_command_sync(json.dumps({"op": "fs.read", "path": "/etc/hostname"}))
+```
+
+### Programmatic Agent
+
+If you need a custom handler or transport:
+
+```python
+from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+from cliptunnel_mcp import Agent
+from cliptunnel_mcp.operations import dispatch
+
+agent = Agent(transport=ClipboardTransport(), handler=dispatch)
+# Blocks until agent.close() — run in a thread or manage lifecycle yourself.
 ```
 
 ## API surface
@@ -211,17 +237,17 @@ The server exposes 13 tools over stdio:
 
 ## Backend selection
 
-ClipTunnel ships no clipboard transport. You inject a `Transport` wired to your platform's clipboard API. The endpoints work with any object that implements `read() -> str` and `write(str) -> None`; implementing the revision monitor protocol enables change-aware waits instead of polling.
+ClipTunnel ships `ClipboardTransport`, a transport backed by the OS clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `xclip`/`xsel` on Linux). It implements both `Transport` and `RevisionMonitor`, so both endpoints get change-aware waits instead of pure polling. The binaries `cliptunnel-agent` and `cliptunnel-mcp` use it automatically.
 
-A transport that exposes `wait_for_revision(after, timeout)` or `wait_for_change(after, timeout)` lets both endpoints block on revision changes rather than polling at `poll_interval`. When neither is present, the endpoints fall back to bounded polling.
+For custom setups — a Citrix clipboard redirection, a shared Gist, a network pipe — implement the `Transport` protocol (`read() -> str`, `write(str) -> None`) and optionally `RevisionMonitor` (`revision` + `wait_for_change`). Inject it into `Controller` or `Agent` directly.
 
 ## Platform support
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| macOS    | Tested | Use `pyperclip`, `AppKit`, or any clipboard bridge as the transport. |
-| Windows  | Tested | Use `pyperclip`, `win32clipboard`, or any clipboard bridge as the transport. |
-| Linux    | Core works | No bundled transport; provide your own X11/Wayland clipboard bridge. |
+| Platform | Status    | Clipboard backend                              |
+|----------|-----------|------------------------------------------------|
+| macOS    | Tested    | `pbcopy`/`pbpaste` (built-in)                  |
+| Windows  | Tested    | `ctypes` + `user32` (no extra deps)            |
+| Linux    | Core works | `xclip` (fallback: `xsel`) — install one of them |
 
 ## Development
 

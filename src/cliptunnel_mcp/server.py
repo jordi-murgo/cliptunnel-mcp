@@ -439,20 +439,23 @@ def create_server():
 def main() -> None:
     """Run the MCP server over stdio (``cliptunnel-mcp[server]`` entry point).
 
-    Logging goes to stderr only — stdout is the JSON-RPC channel. A
-    Controller must be injected via :func:`set_controller` for tools to
-    reach an Agent; until then every tool call reports an error string.
+    A :class:`~cliptunnel_mcp.clipboard_transport.ClipboardTransport` is
+    created automatically and wired into a :class:`Controller`, so every
+    ``remote_*`` tool can reach an Agent running on the same shared
+    clipboard without extra configuration.
+
+    Logging goes to stderr only — stdout is the JSON-RPC channel.
     """
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    if _get_controller() is None:
-        logger.warning(
-            "no Controller injected — tools will report errors until "
-            "set_controller() is called"
-        )
+    from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+
+    transport = ClipboardTransport()
+    set_controller(Controller(transport=transport))
+    logger.info("Controller wired to local OS clipboard transport")
     create_server().run(transport="stdio")
 
 
