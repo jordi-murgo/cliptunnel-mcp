@@ -6,7 +6,9 @@ clipboard — the channel both endpoints share on a locked-down machine.
 Platform drivers:
 
 * **macOS** — ``pbcopy``/``pbpaste`` (polling, 100 ms).
-* **Windows** — ``ctypes`` + ``user32`` (polling, 100 ms).
+* **Windows** — ``ctypes`` + ``user32`` (polling, 100 ms).  All Win32
+  prototypes are declared with proper ``restype``/``argtypes`` so that
+  64-bit handles are not truncated to ``c_int``.
 * **Linux / Wayland** — ``wl-copy``/``wl-paste``.  Uses
   ``wl-paste --watch`` for *event-driven* change detection: no polling,
   zero CPU when idle, sub-millisecond latency on change.
@@ -44,7 +46,44 @@ def _have(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
-# ── Clipboard read / write primitives ────────────────────────────────────────
+# ── Windows clipboard via ctypes ─────────────────────────────────────────────
+
+def _win_clipboard_prototypes() -> tuple[object, object]:
+    """Declare Win32 prototypes so 64-bit handles are not truncated.
+
+    Returns ``(user32, kernel32)`` with ``argtypes``/``restype`` set on
+    every function we call.  Without this, ctypes defaults to ``c_int``
+    return values, which silently truncates 64-bit pointers on 64-bit
+    Windows and crashes the process.
+    """
+    import ctypes
+    import ctypes.wintypes as w
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    user32.OpenClipboard.argtypes = [w.HWND]
+    user32.OpenClipboard.restype = w.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = w.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = w.BOOL
+    user32.GetClipboardData.argtypes = [w.UINT]
+    user32.GetClipboardData.restype = w.HANDLE
+    user32.SetClipboardData.argtypes = [w.UINT, w.HANDLE]
+    user32.SetClipboardData.restype = w.HANDLE
+
+    kernel32.GlobalAlloc.argtypes = [w.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = w.HGLOBAL
+    kernel32.GlobalLock.argtypes = [w.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [w.HGLOBAL]
+    kernel32.GlobalUnlock.restype = w.BOOL
+    kernel32.GlobalFree.argtypes = [w.HGLOBAL]
+    kernel32.GlobalFree.restype = w.HGLOBAL
+
+    return user32, kernel32
+
 
 def _read_clipboard_bytes() -> bytes:
     """Return the current clipboard contents as raw bytes."""
@@ -55,10 +94,13 @@ def _read_clipboard_bytes() -> bytes:
         ).stdout
     if system == "Windows":
         import ctypes
+        import ctypes.wintypes as w
 
         CF_UNICODETEXT = 13
-        user32 = ctypes.windll.user32
-        user32.OpenClipboard(0)
+        user32, _kernel32 = _win_clipboard_prototypes()
+
+        if not user32.OpenClipboard(None):
+            return b""
         try:
             handle = user32.GetClipboardData(CF_UNICODETEXT)
             if not handle:
@@ -98,11 +140,11 @@ def _write_clipboard_bytes(data: bytes) -> None:
 
         CF_UNICODETEXT = 13
         GMEM_MOVEABLE = 0x0002
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
+        user32, kernel32 = _win_clipboard_prototypes()
 
         text = data.decode("utf-8")
-        user32.OpenClipboard(0)
+        if not user32.OpenClipboard(None):
+            return
         try:
             user32.EmptyClipboard()
             if not text:
@@ -153,11 +195,11 @@ class ClipboardTransport:
     """
 
     def __init__(self, *, poll_interval: float = 0.1) -> None:
-        self._condition = threading.Condition()
+        self._condition: threading.Condition = threading.Condition()
         self._value: str = ""
-        self._revision = 0
-        self._poll_interval = poll_interval
-        self._running = True
+        self._revision: int = 0
+        self._poll_interval: float = poll_interval
+        self._running: bool = True
         self._watch_proc: subprocess.Popen[bytes] | None = None
         self._watch_thread: threading.Thread | None = None
         self._poller_thread: threading.Thread | None = None
