@@ -254,22 +254,39 @@ def main() -> None:
     backed by the system clipboard and wires :func:`cliptunnel_mcp.operations.dispatch`
     as the command handler, then blocks until interrupted.
     """
+    import logging
     import signal
     import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+    logger = logging.getLogger("cliptunnel-agent")
 
     from cliptunnel_mcp.clipboard_transport import ClipboardTransport
     from cliptunnel_mcp.operations import dispatch as handler
 
+    logger.info("starting agent on local OS clipboard")
     transport = ClipboardTransport()
+    logger.info("clipboard transport ready (revision=%d)", transport.revision)
     agent = Agent(transport, handler)
+    logger.info("agent running — press Ctrl+C to stop")
 
     def _shutdown(signum: int, frame: object) -> None:
+        logger.info("received signal %d, shutting down", signum)
         agent.close()
         transport.close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+    # SIGTERM is not deliverable on Windows; only register if available.
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, _shutdown)
+        except (OSError, ValueError):
+            pass
 
     # Block forever; background threads do the work.
     try:
