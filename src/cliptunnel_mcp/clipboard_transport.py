@@ -97,7 +97,7 @@ def _read_clipboard_bytes() -> bytes:
         import ctypes.wintypes as w
 
         CF_UNICODETEXT = 13
-        user32, _kernel32 = _win_clipboard_prototypes()
+        user32, kernel32 = _win_clipboard_prototypes()
 
         if not user32.OpenClipboard(None):
             return b""
@@ -105,11 +105,20 @@ def _read_clipboard_bytes() -> bytes:
             handle = user32.GetClipboardData(CF_UNICODETEXT)
             if not handle:
                 return b""
-            ptr = ctypes.cast(handle, ctypes.c_wchar_p)
-            value = ptr.value
-            if value is None:
+            # GetClipboardData returns an HGLOBAL (global memory handle),
+            # not a direct pointer.  We must GlobalLock it to get the
+            # actual address, then GlobalUnlock when done.
+            ptr = kernel32.GlobalLock(handle)
+            if not ptr:
                 return b""
-            return value.encode("utf-8")
+            try:
+                str_ptr = ctypes.cast(ptr, ctypes.c_wchar_p)
+                value = str_ptr.value
+                if value is None:
+                    return b""
+                return value.encode("utf-8")
+            finally:
+                kernel32.GlobalUnlock(handle)
         finally:
             user32.CloseClipboard()
     # Linux
