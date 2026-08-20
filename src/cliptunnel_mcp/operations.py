@@ -345,7 +345,10 @@ def _add_memory_info(info: dict) -> None:
 
             stat = MEMORYSTATUSEX()
             stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+            kernel32.GlobalMemoryStatusEx.restype = ctypes.c_int
+            kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
             info["mem_total"] = stat.ullTotalPhys
             info["mem_available"] = stat.ullAvailPhys
             info["mem_percent_used"] = stat.dwMemoryLoad
