@@ -18,7 +18,9 @@ from cliptunnel_mcp.protocol import (
 
 class TestPackageIdentity(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(cliptunnel_mcp.__version__, "0.1.0")
+        from importlib.metadata import version
+
+        self.assertEqual(cliptunnel_mcp.__version__, version("cliptunnel-mcp"))
 
     def test_reexports_protocol_surface(self):
         self.assertIs(cliptunnel_mcp.pack, pack)
