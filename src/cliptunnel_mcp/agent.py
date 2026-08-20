@@ -278,3 +278,7 @@ def main() -> None:
     except KeyboardInterrupt:
         agent.close()
         transport.close()
+
+
+if __name__ == "__main__":
+    main()

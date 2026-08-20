@@ -60,6 +60,13 @@ The simplest way to run the Agent is the installed binary:
 cliptunnel-agent
 ```
 
+> **Antivirus / EDR workaround (Windows)**: unsigned `.exe` entry points may be quarantined. Use `python -m` instead — it runs through the already-trusted Python interpreter with no generated binary:
+>
+> ```bash
+> python -m cliptunnel_mcp.agent    # instead of cliptunnel-agent
+> python -m cliptunnel_mcp.server   # instead of cliptunnel-mcp
+> ```
+
 This builds a `ClipboardTransport` backed by the system clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `wl-copy`/`wl-paste` on Wayland, `xclip`/`xsel` on X11) and wires `operations.dispatch` as the command handler. The Agent watches the clipboard slot, ACKs commands, processes them in a worker pool, and writes responses back. Press `Ctrl+C` to stop.
 
 ### Controller + MCP server (operator machine)
@@ -72,6 +79,19 @@ On the operator side, configure your MCP client (Claude Desktop, Cursor, Pi, etc
     "cliptunnel": {
       "command": "cliptunnel-mcp",
       "args": []
+    }
+  }
+}
+```
+
+If the `cliptunnel-mcp` binary is blocked by antivirus, use `python -m`:
+
+```json
+{
+  "mcpServers": {
+    "cliptunnel": {
+      "command": "python",
+      "args": ["-m", "cliptunnel_mcp.server"]
     }
   }
 }
