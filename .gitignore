@@ -26,3 +26,6 @@ Thumbs.db
 .ruff_cache/
 # Local Pi runtime state
 .atl/
+
+# ClipTunnel runtime state
+.cliptunnel_controller_seq
