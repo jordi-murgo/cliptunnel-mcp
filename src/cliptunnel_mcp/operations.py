@@ -332,26 +332,25 @@ def _add_memory_info(info: dict) -> None:
         try:
             import ctypes
 
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-
-            stat = MEMORYSTATUSEX()
-            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            # GlobalMemoryStatusEx requires dwLength = 64 (sizeof
+            # MEMORYSTATUSEX on Win64).  We use a raw 64-byte buffer
+            # and read fields by offset to avoid struct layout issues
+            # across Python versions and platforms.
+            buf = (ctypes.c_ubyte * 64)()
+            ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulong))[0] = 64
             kernel32 = ctypes.windll.kernel32
-            kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+            kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.c_void_p]
             kernel32.GlobalMemoryStatusEx.restype = ctypes.c_int
-            kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-            info["mem_total"] = stat.ullTotalPhys
-            info["mem_available"] = stat.ullAvailPhys
-            info["mem_percent_used"] = stat.dwMemoryLoad
+            ret = kernel32.GlobalMemoryStatusEx(buf)
+            if ret:
+                # DWORD dwMemoryLoad at offset 4
+                # DWORDLONG ullTotalPhys at offset 8
+                # DWORDLONG ullAvailPhys at offset 16
+                ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulonglong))
+                info["mem_total"] = ptr[1]   # offset 8  / 8
+                info["mem_available"] = ptr[2]  # offset 16 / 8
+                load_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulong))
+                info["mem_percent_used"] = load_ptr[1]  # offset 4 / 4
         except Exception:
             pass
     else:
