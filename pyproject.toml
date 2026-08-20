@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cliptunnel-mcp"
+version = "0.1.0"
+description = "Operate a locked-down remote machine through its clipboard"
+authors = [
+    { name = "Jordi Murgó", email = "jordi.murgo@gmail.com" },
+]
+maintainers = [
+    { name = "Jordi Murgó", email = "jordi.murgo@gmail.com" },
+]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "clipboard", "tunnel", "remote", "agent", "controller", "citrix"]
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+server = ["mcp>=1.2,<2"]
+
+[project.urls]
+Homepage = "https://github.com/jordi-murgo/cliptunnel-mcp"
+Repository = "https://github.com/jordi-murgo/cliptunnel-mcp.git"
+Issues = "https://github.com/jordi-murgo/cliptunnel-mcp/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cliptunnel_mcp = ["py.typed"]

@@ -1,0 +1,245 @@
+"""Agent endpoint (role A) of the ClipTunnel CT1 protocol.
+
+Runs on the locked-down remote machine. Watches an injected slot-compatible
+:class:`~cliptunnel_mcp.transport.Transport` for commands, ACKs them
+immediately, processes them in a worker pool, and writes one typed response
+at a time — retransmitting it byte-identically until its exact ACK arrives.
+
+Ported from the hardened vulcano-helper VDI (seq-bound ARQ, generation-safe
+semantics) with the role alphabet narrowed to {C, A} and the clipboard
+replaced by constructor injection — this module never imports clipboard code.
+
+Zero external dependencies — stdlib only.  Python 3.10 compatible.
+"""
+from __future__ import annotations
+
+import concurrent.futures
+import queue
+import threading
+import time
+from collections.abc import Callable
+
+from cliptunnel_mcp.protocol import (
+    Message,
+    MsgType,
+    Role,
+    SeqTracker,
+    pack,
+    unpack,
+    validate,
+)
+from cliptunnel_mcp.transport import Transport
+
+Handler = Callable[[str], tuple[str, bool]]
+"""Processes a command payload, returning ``(output, is_error)``."""
+
+
+def _slot_revision(transport: Transport) -> int:
+    """Current slot revision; 0 when the transport has no monitor half."""
+    revision = getattr(transport, "revision", None)
+    return revision if isinstance(revision, int) else 0
+
+
+def _wait_for_slot_change(transport: Transport, after: int, timeout: float) -> int:
+    """Bounded change-aware wait on the slot revision.
+
+    Uses the monitor half when the transport exposes ``wait_for_revision``
+    or ``wait_for_change``; otherwise falls back to bounded polling.
+    """
+    for name in ("wait_for_revision", "wait_for_change"):
+        waiter = getattr(transport, name, None)
+        if callable(waiter):
+            return int(waiter(after, timeout))
+    deadline = time.monotonic() + timeout
+    while True:
+        current = _slot_revision(transport)
+        if current > after:
+            return current
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return current
+        time.sleep(min(remaining, 0.005))
+
+
+class Agent:
+    """Agent endpoint: immediate ACK, worker pool, serialized typed responses.
+
+    Exactly one response envelope is pending at a time; only the matching
+    ``A(seq)`` from the Controller releases it (a new command never
+    implicitly acks a pending response). Responses are retransmitted on ACK
+    timeout and replayed from the typed cache for duplicate commands. All
+    stop state and queues are generation-local to this instance, so closing
+    and starting a new Agent never strands threads.
+    """
+
+    def __init__(
+        self,
+        transport: Transport,
+        handler: Handler,
+        *,
+        poll_interval: float = 0.1,
+        max_workers: int = 5,
+        response_ack_timeout: float = 1.0,
+    ) -> None:
+        self.tracker = SeqTracker()
+        self.poll_interval = poll_interval
+        self.response_ack_timeout = response_ack_timeout
+        self._transport = transport
+        self._handler = handler
+        self._running = True
+        self._last_raw = ""
+        self._slot_lock = threading.RLock()
+        self._response_condition = threading.Condition(self._slot_lock)
+        self._pending_response: tuple[int, str] | None = None
+        self._response_queue: queue.Queue[tuple[int, str, bool]] = queue.Queue()
+        self._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="cliptunnel-agent-worker",
+        )
+        self._dispatcher_thread = threading.Thread(
+            target=self._response_dispatcher,
+            name="cliptunnel-agent-responder",
+            daemon=True,
+        )
+        self._reader_thread = threading.Thread(
+            target=self._reader, name="cliptunnel-agent-reader", daemon=True
+        )
+        self._dispatcher_thread.start()
+        self._reader_thread.start()
+
+    # ── Public API ───────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Stop this agent generation. Idempotent; never strands a thread."""
+        with self._slot_lock:
+            if not self._running:
+                return
+            self._running = False
+            self._response_condition.notify_all()
+        self._response_queue.put((-1, "", False))
+        self._dispatcher_thread.join(timeout=2.0)
+        self._reader_thread.join(timeout=2.0)
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    # ── Background threads ───────────────────────────────────────────
+
+    def _reader(self) -> None:
+        """Reader thread: change-aware reads of the shared slot."""
+        revision = _slot_revision(self._transport)
+        while self._running:
+            _wait_for_slot_change(self._transport, revision, self.poll_interval)
+            if not self._running:
+                break
+            revision = _slot_revision(self._transport)
+            self._tick()
+
+    def _tick(self) -> None:
+        raw = self._transport.read()
+
+        # Skip if the slot is unchanged or empty.
+        if not raw:
+            return
+        if raw == self._last_raw:
+            return
+
+        if not validate(raw, Role.AGENT):
+            self._last_raw = raw
+            return
+
+        msg = unpack(raw)
+        if msg is None:
+            self._last_raw = raw
+            return
+
+        # Only the Controller's matching ACK releases the pending response.
+        if msg.mtype == MsgType.ACK.value:
+            with self._response_condition:
+                if (
+                    self._pending_response is not None
+                    and self._pending_response[0] == msg.seq
+                ):
+                    self._pending_response = None
+                    self._response_condition.notify_all()
+                self._last_raw = raw
+            return
+
+        # Only commands trigger processing.
+        if msg.mtype != MsgType.COMMAND.value:
+            self._last_raw = raw
+            return
+
+        # ACK immediately — frees the slot for the Controller.
+        self._write_slot_safe(pack(Message(
+            frm=Role.AGENT.value,
+            to=Role.CONTROLLER.value,
+            seq=msg.seq,
+            mtype=MsgType.ACK.value,
+            payload="",
+        )))
+
+        # Dedupe: duplicates are ACKed above; done ones replay the cached
+        # response, in-flight ones are already being processed.
+        if not self.tracker.should_process(msg.seq):
+            if self.tracker.get_state(msg.seq) == "done":
+                cached = self.tracker.get_cached_response(msg.seq)
+                if cached is not None:
+                    with self._response_condition:
+                        already_pending = (
+                            self._pending_response is not None
+                            and self._pending_response[0] == msg.seq
+                        )
+                    if not already_pending:
+                        payload, is_error = cached
+                        self._response_queue.put((msg.seq, payload, is_error))
+            return
+
+        self.tracker.mark_processing(msg.seq)
+        self._pool.submit(self._process_and_enqueue, msg)
+
+    def _process_and_enqueue(self, msg: Message) -> None:
+        """Pool worker: run the handler and enqueue the typed response."""
+        try:
+            output, is_error = self._handler(msg.payload)
+        except Exception as exc:
+            output, is_error = str(exc), True
+        self.tracker.mark_done(msg.seq, output, is_error)
+        self._response_queue.put((msg.seq, output, is_error))
+
+    def _response_dispatcher(self) -> None:
+        """Send one response envelope until its exact ACK arrives."""
+        while self._running:
+            try:
+                seq, payload, is_error = self._response_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if not self._running or seq == -1:
+                break
+
+            mtype = MsgType.ERROR.value if is_error else MsgType.RESPONSE.value
+            wire = pack(Message(
+                frm=Role.AGENT.value,
+                to=Role.CONTROLLER.value,
+                seq=seq,
+                mtype=mtype,
+                payload=payload,
+            ))
+
+            with self._response_condition:
+                # Wait for any previous response to be acked; a new command
+                # never releases it, only the exact ACK does.
+                while self._pending_response is not None and self._running:
+                    self._response_condition.wait()
+                if not self._running:
+                    break
+                self._pending_response = (seq, wire)
+                while self._running and self._pending_response == (seq, wire):
+                    self._write_slot_safe(wire)
+                    self._response_condition.wait(self.response_ack_timeout)
+
+    # ── Slot access ──────────────────────────────────────────────────
+
+    def _write_slot_safe(self, wire: str) -> None:
+        """Write to the slot and update _last_raw atomically."""
+        with self._slot_lock:
+            self._transport.write(wire)
+            self._last_raw = wire
