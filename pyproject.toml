@@ -33,6 +33,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+cliptunnel-mcp = "cliptunnel_mcp.server:main"
+cliptunnel-agent = "cliptunnel_mcp.agent:main"
+
 [project.optional-dependencies]
 server = ["mcp>=1.2,<2"]
 

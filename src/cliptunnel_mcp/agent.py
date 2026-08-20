@@ -243,3 +243,38 @@ class Agent:
         with self._slot_lock:
             self._transport.write(wire)
             self._last_raw = wire
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """Run the Agent on the local OS clipboard (``cliptunnel-agent`` entry point).
+
+    Builds a :class:`~cliptunnel_mcp.clipboard_transport.ClipboardTransport`
+    backed by the system clipboard and wires :func:`cliptunnel_mcp.operations.dispatch`
+    as the command handler, then blocks until interrupted.
+    """
+    import signal
+    import sys
+
+    from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+    from cliptunnel_mcp.operations import dispatch as handler
+
+    transport = ClipboardTransport()
+    agent = Agent(transport, handler)
+
+    def _shutdown(signum: int, frame: object) -> None:
+        agent.close()
+        transport.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    # Block forever; background threads do the work.
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        agent.close()
+        transport.close()
