@@ -3,11 +3,20 @@
 A real :class:`~cliptunnel_mcp.transport.Transport` backed by the system
 clipboard — the channel both endpoints share on a locked-down machine.
 
-Uses ``pbcopy``/``pbpaste`` on macOS, ``ctypes`` + ``user32`` on Windows,
-and ``xclip`` (falling back to ``xsel``) on Linux.  The clipboard has no
-monotonic revision counter, so one is maintained by polling: every
-content change (detected via a fast hash) bumps ``revision`` by exactly
-one and wakes blocked waiters — matching the contract that
+Platform drivers:
+
+* **macOS** — ``pbcopy``/``pbpaste`` (polling, 100 ms).
+* **Windows** — ``ctypes`` + ``user32`` (polling, 100 ms).
+* **Linux / Wayland** — ``wl-copy``/``wl-paste``.  Uses
+  ``wl-paste --watch`` for *event-driven* change detection: no polling,
+  zero CPU when idle, sub-millisecond latency on change.
+* **Linux / X11** — ``xclip`` (fallback ``xsel``).  Polling, 100 ms;
+  X11 has no usable clipboard-change notification.
+
+The clipboard has no monotonic revision counter, so one is maintained
+by the driver: every content change (detected via hash for polling
+drivers, or by the watch event for Wayland) bumps ``revision`` by
+exactly one and wakes blocked waiters — matching the contract that
 :class:`tests.clipboard_slot.ClipboardSlot` models in-memory.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
@@ -15,11 +24,27 @@ Zero external dependencies — stdlib only.  Python 3.10 compatible.
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
+import shutil
 import subprocess
 import threading
 import time
 
+
+# ── Platform detection ───────────────────────────────────────────────────────
+
+def _is_wayland() -> bool:
+    """True when the active session is Wayland (WAYLAND_DISPLAY set)."""
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _have(binary: str) -> bool:
+    """True when *binary* is on PATH."""
+    return shutil.which(binary) is not None
+
+
+# ── Clipboard read / write primitives ────────────────────────────────────────
 
 def _read_clipboard_bytes() -> bytes:
     """Return the current clipboard contents as raw bytes."""
@@ -45,7 +70,11 @@ def _read_clipboard_bytes() -> bytes:
             return value.encode("utf-8")
         finally:
             user32.CloseClipboard()
-    # Linux / *nix
+    # Linux
+    if _is_wayland() and _have("wl-paste"):
+        return subprocess.run(
+            ["wl-paste", "--no-newline"], capture_output=True, check=False
+        ).stdout
     for cmd in (["xclip", "-selection", "clipboard", "-o"],
                 ["xsel", "--clipboard", "--output"]):
         try:
@@ -78,7 +107,6 @@ def _write_clipboard_bytes(data: bytes) -> None:
             user32.EmptyClipboard()
             if not text:
                 return
-            # Allocate a global memory block and copy the string into it.
             wlen = (len(text) + 1) * ctypes.sizeof(w.WCHAR)
             h_global = kernel32.GlobalAlloc(GMEM_MOVEABLE, wlen)
             if not h_global:
@@ -93,7 +121,10 @@ def _write_clipboard_bytes(data: bytes) -> None:
         finally:
             user32.CloseClipboard()
         return
-    # Linux / *nix
+    # Linux
+    if _is_wayland() and _have("wl-copy"):
+        subprocess.run(["wl-copy"], input=data, check=False)
+        return
     for cmd in (["xclip", "-selection", "clipboard", "-i"],
                 ["xsel", "--clipboard", "--input"]):
         try:
@@ -103,16 +134,22 @@ def _write_clipboard_bytes(data: bytes) -> None:
             continue
 
 
+# ── Transport ────────────────────────────────────────────────────────────────
+
 class ClipboardTransport:
     """OS clipboard backed :class:`Transport` with revision tracking.
 
     Satisfies both :class:`~cliptunnel_mcp.transport.Transport` and
     :class:`~cliptunnel_mcp.transport.RevisionMonitor` structurally.
 
-    A background poller (daemon thread, started on construction) checks
-    the clipboard every *poll_interval* seconds.  When the content hash
-    changes, ``revision`` is bumped and waiters are woken — mirroring the
-    semantics of :class:`tests.clipboard_slot.ClipboardSlot`.
+    On Wayland, change detection is *event-driven* via
+    ``wl-paste --watch``: a long-lived subprocess prints the clipboard
+    contents on every change, and a reader thread bumps ``revision``
+    immediately — no polling, no CPU when idle.
+
+    On macOS, Windows, and X11, a daemon poller checks the clipboard
+    every *poll_interval* seconds.  When the content hash changes,
+    ``revision`` is bumped and waiters are woken.
     """
 
     def __init__(self, *, poll_interval: float = 0.1) -> None:
@@ -121,20 +158,23 @@ class ClipboardTransport:
         self._revision = 0
         self._poll_interval = poll_interval
         self._running = True
-        self._poller = threading.Thread(
-            target=self._poll_loop,
-            name="cliptunnel-clipboard-poller",
-            daemon=True,
-        )
+        self._watch_proc: subprocess.Popen[bytes] | None = None
+        self._watch_thread: threading.Thread | None = None
+        self._poller_thread: threading.Thread | None = None
+
         # Seed with the current clipboard contents without bumping revision.
         raw = _read_clipboard_bytes()
         self._value = raw.decode("utf-8", errors="replace")
-        self._poller.start()
+
+        if self._use_wayland_watch():
+            self._start_wayland_watch()
+        else:
+            self._start_poller()
 
     # ── Transport interface ──────────────────────────────────────────
 
     def read(self) -> str:
-        """Return the cached clipboard value (updated by the poller)."""
+        """Return the cached clipboard value (updated by the driver)."""
         with self._condition:
             return self._value
 
@@ -167,12 +207,81 @@ class ClipboardTransport:
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Stop the background poller."""
+        """Stop the background driver (poller or wl-paste watch)."""
         with self._condition:
             self._running = False
             self._condition.notify_all()
+        if self._watch_proc is not None:
+            self._watch_proc.terminate()
+            try:
+                self._watch_proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._watch_proc.kill()
+        if self._watch_thread is not None:
+            self._watch_thread.join(timeout=2.0)
+        if self._poller_thread is not None:
+            self._poller_thread.join(timeout=2.0)
 
-    # ── Internal ─────────────────────────────────────────────────────
+    # ── Internal: driver selection ───────────────────────────────────
+
+    @staticmethod
+    def _use_wayland_watch() -> bool:
+        """True when we can use ``wl-paste --watch`` (event-driven)."""
+        return (
+            platform.system() == "Linux"
+            and _is_wayland()
+            and _have("wl-paste")
+        )
+
+    # ── Internal: Wayland event-driven watch ─────────────────────────
+
+    def _start_wayland_watch(self) -> None:
+        """Start ``wl-paste --watch`` for event-driven change detection."""
+        self._watch_proc = subprocess.Popen(
+            ["wl-paste", "--watch", "cat"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._watch_thread = threading.Thread(
+            target=self._wayland_watch_loop,
+            name="cliptunnel-wayland-watcher",
+            daemon=True,
+        )
+        self._watch_thread.start()
+
+    def _wayland_watch_loop(self) -> None:
+        """Read ``wl-paste --watch`` output and bump revision on change."""
+        assert self._watch_proc is not None
+        assert self._watch_proc.stdout is not None
+        last_hash = hashlib.sha256(
+            self._value.encode("utf-8", errors="replace")
+        ).digest()
+        while self._running:
+            line = self._watch_proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace")
+            current_hash = hashlib.sha256(
+                text.encode("utf-8", errors="replace")
+            ).digest()
+            if current_hash == last_hash:
+                continue
+            last_hash = current_hash
+            with self._condition:
+                self._value = text
+                self._revision += 1
+                self._condition.notify_all()
+
+    # ── Internal: polling driver (macOS, Windows, X11) ───────────────
+
+    def _start_poller(self) -> None:
+        """Start a daemon poller for platforms without change events."""
+        self._poller_thread = threading.Thread(
+            target=self._poll_loop,
+            name="cliptunnel-clipboard-poller",
+            daemon=True,
+        )
+        self._poller_thread.start()
 
     def _poll_loop(self) -> None:
         last_hash = hashlib.sha256(

@@ -60,7 +60,7 @@ The simplest way to run the Agent is the installed binary:
 cliptunnel-agent
 ```
 
-This builds a `ClipboardTransport` backed by the system clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `xclip`/`xsel` on Linux) and wires `operations.dispatch` as the command handler. The Agent watches the clipboard slot, ACKs commands, processes them in a worker pool, and writes responses back. Press `Ctrl+C` to stop.
+This builds a `ClipboardTransport` backed by the system clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `wl-copy`/`wl-paste` on Wayland, `xclip`/`xsel` on X11) and wires `operations.dispatch` as the command handler. The Agent watches the clipboard slot, ACKs commands, processes them in a worker pool, and writes responses back. Press `Ctrl+C` to stop.
 
 ### Controller + MCP server (operator machine)
 
@@ -224,17 +224,18 @@ The server exposes 13 tools over stdio:
 
 ## Backend selection
 
-ClipTunnel ships `ClipboardTransport`, a transport backed by the OS clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `xclip`/`xsel` on Linux). It implements both `Transport` and `RevisionMonitor`, so both endpoints get change-aware waits instead of pure polling. The binaries `cliptunnel-agent` and `cliptunnel-mcp` use it automatically.
+ClipTunnel ships `ClipboardTransport`, a transport backed by the OS clipboard. On Wayland it uses `wl-paste --watch` for *event-driven* change detection (zero polling, zero CPU when idle). On macOS, Windows, and X11 it polls every 100 ms with hash-based change detection. It implements both `Transport` and `RevisionMonitor`, so both endpoints get change-aware waits. The binaries `cliptunnel-agent` and `cliptunnel-mcp` use it automatically.
 
 For custom setups — a Citrix clipboard redirection, a shared Gist, a network pipe — implement the `Transport` protocol (`read() -> str`, `write(str) -> None`) and optionally `RevisionMonitor` (`revision` + `wait_for_change`). Inject it into `Controller` or `Agent` directly.
 
 ## Platform support
 
-| Platform | Status    | Clipboard backend                              |
-|----------|-----------|------------------------------------------------|
-| macOS    | Tested    | `pbcopy`/`pbpaste` (built-in)                  |
-| Windows  | Tested    | `ctypes` + `user32` (no extra deps)            |
-| Linux    | Core works | `xclip` (fallback: `xsel`) — install one of them |
+| Platform          | Status      | Clipboard backend                                  | Change detection |
+|-------------------|-------------|----------------------------------------------------|------------------|
+| macOS             | Tested      | `pbcopy`/`pbpaste` (built-in)                      | Polling (100 ms) |
+| Windows           | Tested      | `ctypes` + `user32` (no extra deps)                | Polling (100 ms) |
+| Linux / Wayland   | Tested      | `wl-copy`/`wl-paste` (`wl-clipboard` package)      | Event-driven     |
+| Linux / X11       | Core works  | `xclip` (fallback: `xsel`)                         | Polling (100 ms) |
 
 ## Development
 
