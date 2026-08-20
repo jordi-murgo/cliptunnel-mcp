@@ -16,32 +16,8 @@ The core package has zero dependencies. The MCP server requires the optional `[s
 
 ## Architecture
 
-```mermaid
-graph TD
-  subgraph Operator["Operator machine"]
-    Client["MCP client<br/>(Claude, Pi, Cursor, …)"]
-    Server["MCP server<br/>(cliptunnel-mcp)"]
-    Controller["Controller<br/>send_command → Future"]
-    CT1["ClipboardTransport<br/>(OS clipboard)"]
-  end
+![Mermaid diagram](https://mermaid.ink/img/Z3JhcGggVEQKICBzdWJncmFwaCBPcGVyYXRvclsiT3BlcmF0b3IgbWFjaGluZSJdCiAgICBDbGllbnRbIk1DUCBjbGllbnQ8YnIvPihDbGF1ZGUsIFBpLCBDdXJzb3IsIOKApikiXQogICAgU2VydmVyWyJNQ1Agc2VydmVyPGJyLz4oY2xpcHR1bm5lbC1tY3ApIl0KICAgIENvbnRyb2xsZXJbIkNvbnRyb2xsZXI8YnIvPnNlbmRfY29tbWFuZCDihpIgRnV0dXJlIl0KICAgIENUMVsiQ2xpcGJvYXJkVHJhbnNwb3J0PGJyLz4oT1MgY2xpcGJvYXJkKSJdCiAgZW5kCgogIHN1YmdyYXBoIFJlbW90ZVsiTG9ja2VkLWRvd24gbWFjaGluZSJdCiAgICBDVDJbIkNsaXBib2FyZFRyYW5zcG9ydDxici8-KE9TIGNsaXBib2FyZCkiXQogICAgQWdlbnRbIkFnZW50PGJyLz5BQ0sg4oaSIHByb2Nlc3Mg4oaSIFIvRSJdCiAgICBEaXNwYXRjaFsiZGlzcGF0Y2g8YnIvPnNoZWxsIMK3IGZzIMK3IGJpbiJdCiAgZW5kCgogIENsaWVudCAtLSAiTUNQIC8gc3RkaW8iIC0tPiBTZXJ2ZXIKICBTZXJ2ZXIgLS0-IENvbnRyb2xsZXIKICBDb250cm9sbGVyIC0tICJDVDEgd2lyZSIgLS0-IENUMQogIENUMSAtLSAiY2xpcGJvYXJkIHNsb3Q8YnIvPihsYXN0LXdyaXRlci13aW5zKSIgLS0-IENUMgogIENUMiAtLT4gQWdlbnQKICBBZ2VudCAtLT4gRGlzcGF0Y2gKICBEaXNwYXRjaCAtLSAicmVzcG9uc2UiIC0tPiBBZ2VudAogIEFnZW50IC0tICJDVDEgd2lyZSIgLS0-IENUMgogIENUMiAtLSAiY2xpcGJvYXJkIHNsb3QiIC0tPiBDVDEKICBDVDEgLS0-IENvbnRyb2xsZXIK)
 
-  subgraph Remote["Locked-down machine"]
-    CT2["ClipboardTransport<br/>(OS clipboard)"]
-    Agent["Agent<br/>ACK → process → R/E"]
-    Dispatch["dispatch<br/>shell · fs · bin"]
-  end
-
-  Client -- "MCP / stdio" --> Server
-  Server --> Controller
-  Controller -- "CT1 wire" --> CT1
-  CT1 -- "clipboard slot<br/>(last-writer-wins)" --> CT2
-  CT2 --> Agent
-  Agent --> Dispatch
-  Dispatch -- "response" --> Agent
-  Agent -- "CT1 wire" --> CT2
-  CT2 -- "clipboard slot" --> CT1
-  CT1 --> Controller
-```
 
 Both endpoints share a single last-writer-wins clipboard slot. The protocol uses stop-and-wait ARQ: the Controller writes one command, the Agent ACKs immediately, processes the command in a worker pool, then writes one typed response (R or E) and retransmits it until the Controller's matching ACK arrives. The Controller sends one command at a time and resolves futures as responses come back.
 
@@ -288,4 +264,4 @@ The test suite uses a deterministic `ClipboardSlot` test double that models the 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/jordi-murgo/cliptunnel-mcp/blob/main/LICENSE).
