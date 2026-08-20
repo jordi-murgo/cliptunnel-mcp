@@ -17,7 +17,7 @@ The core package has zero dependencies. The MCP server requires the optional `[s
 ## Architecture
 
 ```mermaid
-graph LR
+graph TD
   subgraph Operator["Operator machine"]
     Client["MCP client<br/>(Claude, Pi, Cursor, …)"]
     Server["MCP server<br/>(cliptunnel-mcp)"]
