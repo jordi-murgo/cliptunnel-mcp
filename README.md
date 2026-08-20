@@ -10,7 +10,7 @@ The package ships three layers:
 
 - **Protocol** — a wire format (`CT1`) with base64 payloads, sequence numbers, and typed messages (command, response, error, ack).
 - **Endpoints** — `Controller` (operator side) and `Agent` (remote side), connected by an injected `Transport`. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
-- **MCP server** — a FastMCP application that exposes the Controller's helpers as `remote_shell`, `remote_fs_*`, `remote_upload`, and `remote_download` tools over stdio.
+- **MCP server** — a FastMCP application that exposes the Controller's helpers as `remote_shell`, `remote_fs_*`, `remote_upload`, `remote_download`, and `remote_sysinfo` tools over stdio.
 
 The core package has zero dependencies. The MCP server requires the optional `[server]` extra (`mcp>=1.2,<2`).
 
@@ -230,6 +230,7 @@ The server exposes 13 tools over stdio:
 | `remote_fs_bin_write` | Write base64 content to a binary file. |
 | `remote_upload` | Upload a local file to the remote machine. |
 | `remote_download` | Download a remote file to the local machine. |
+| `remote_sysinfo` | Return system info (OS, Python, CPU, memory, disk) from the remote machine. |
 
 ## Lifecycle and coalescing semantics
 
