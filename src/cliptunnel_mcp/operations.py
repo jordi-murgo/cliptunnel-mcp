@@ -52,6 +52,7 @@ def dispatch(payload: str) -> tuple[str, bool]:
         "fs.find": op_fs_find,
         "fs.bin_read": op_fs_bin_read,
         "fs.bin_write": op_fs_bin_write,
+        "sysinfo": op_sysinfo,
     }
 
     handler = handlers.get(op)
@@ -262,3 +263,176 @@ def op_fs_bin_write(req: dict) -> tuple[str, bool]:
     with open(path, "wb") as f:
         f.write(data)
     return (f"wrote {len(data)} bytes to {path}", False)
+
+
+# ── sysinfo ──────────────────────────────────────────────────────────────────
+
+def op_sysinfo(req: dict) -> tuple[str, bool]:
+    """Return system information as JSON.
+
+    Includes OS, hostname, architecture, Python version, cliptunnel-mcp
+    version, CPU count, memory, disk, current user, working directory,
+    and environment details. Works on Windows, macOS, and Linux.
+    """
+    import platform
+    import shutil
+    import socket
+    import sys
+
+    info: dict = {}
+
+    # ── OS ───────────────────────────────────────────────────────────
+    info["os"] = platform.system()
+    info["os_release"] = platform.release()
+    info["os_version"] = platform.version()
+    info["hostname"] = socket.gethostname()
+    info["arch"] = platform.machine()
+    info["processor"] = platform.processor() or "unknown"
+
+    # ── Python ───────────────────────────────────────────────────────
+    info["python_version"] = sys.version
+    info["python_executable"] = sys.executable
+    info["python_implementation"] = platform.python_implementation()
+
+    # ── cliptunnel-mcp ──────────────────────────────────────────────
+    try:
+        from importlib.metadata import version as _pkg_version
+        info["cliptunnel_mcp_version"] = _pkg_version("cliptunnel-mcp")
+    except Exception:
+        try:
+            from cliptunnel_mcp import __version__
+            info["cliptunnel_mcp_version"] = __version__
+        except Exception:
+            info["cliptunnel_mcp_version"] = "unknown"
+
+    # ── User & environment ──────────────────────────────────────────
+    info["user"] = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    info["cwd"] = os.getcwd()
+    info["shell"] = os.environ.get("SHELL", "")
+    info["home"] = os.path.expanduser("~")
+
+    # ── CPU ─────────────────────────────────────────────────────────
+    info["cpu_count"] = os.cpu_count() or 0
+
+    # ── Memory ──────────────────────────────────────────────────────
+    _add_memory_info(info)
+
+    # ── Disk ────────────────────────────────────────────────────────
+    _add_disk_info(info)
+
+    return (json.dumps(info, indent=2, default=str), False)
+
+
+def _add_memory_info(info: dict) -> None:
+    """Add memory info, platform-specific."""
+    import platform
+
+    system = platform.system()
+    if system == "Windows":
+        try:
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            info["mem_total"] = stat.ullTotalPhys
+            info["mem_available"] = stat.ullAvailPhys
+            info["mem_percent_used"] = stat.dwMemoryLoad
+        except Exception:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+            ["vm_stat"] if system == "Darwin" else ["free", "-b"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            if result.returncode == 0:
+                if system == "Darwin":
+                    _parse_darwin_vm_stat(info, result.stdout)
+                else:
+                    _parse_linux_free(info, result.stdout)
+        except Exception:
+            pass
+
+
+def _parse_darwin_vm_stat(info: dict, output: str) -> None:
+    """Parse macOS vm_stat output."""
+    import re
+
+    page_size = 4096
+    total_match = re.search(r"page size of (\d+) bytes", output)
+    if total_match:
+        page_size = int(total_match.group(1))
+
+    free_match = re.search(r"Pages free:\s+(\d+)", output)
+    active_match = re.search(r"Pages active:\s+(\d+)", output)
+    inactive_match = re.search(r"Pages inactive:\s+(\d+)", output)
+    wired_match = re.search(r"Pages wired down:\s+(\d+)", output)
+    spec_match = re.search(r"Pages occupied by compressor:\s+(\d+)", output)
+
+    free_pages = int(free_match.group(1)) if free_match else 0
+    active_pages = int(active_match.group(1)) if active_match else 0
+    inactive_pages = int(inactive_match.group(1)) if inactive_match else 0
+    wired_pages = int(wired_match.group(1)) if wired_match else 0
+    spec_pages = int(spec_match.group(1)) if spec_match else 0
+
+    used_pages = active_pages + wired_pages
+    total_pages = free_pages + active_pages + inactive_pages + wired_pages + spec_pages
+
+    info["mem_total"] = total_pages * page_size
+    info["mem_available"] = (free_pages + inactive_pages) * page_size
+    if total_pages > 0:
+        info["mem_percent_used"] = round(used_pages * 100 / total_pages, 1)
+
+
+def _parse_linux_free(info: dict, output: str) -> None:
+    """Parse Linux free -b output."""
+    lines = output.strip().split("\n")
+    if len(lines) >= 2:
+        parts = lines[1].split()
+        if len(parts) >= 7:
+            info["mem_total"] = int(parts[1])
+            info["mem_available"] = int(parts[6])
+            if int(parts[1]) > 0:
+                info["mem_percent_used"] = round(
+                    (int(parts[2]) * 100 / int(parts[1])), 1
+                )
+
+
+def _add_disk_info(info: dict) -> None:
+    """Add disk usage for the current working directory."""
+    import platform
+
+    system = platform.system()
+    try:
+        if system == "Windows":
+            import ctypes
+
+            free_bytes = ctypes.c_ulonglong(0)
+            total_bytes = ctypes.c_ulonglong(0)
+            available = ctypes.c_ulonglong(0)
+            ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                ctypes.c_wchar_p(os.getcwd()),
+                ctypes.byref(free_bytes),
+                ctypes.byref(total_bytes),
+                ctypes.byref(available),
+            )
+            info["disk_total"] = total_bytes.value
+            info["disk_free"] = free_bytes.value
+        else:
+            stat = os.statvfs(os.getcwd())
+            info["disk_total"] = stat.f_blocks * stat.f_frsize
+            info["disk_free"] = stat.f_bavail * stat.f_frsize
+    except Exception:
+        pass

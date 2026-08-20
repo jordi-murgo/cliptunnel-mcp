@@ -43,6 +43,7 @@ EXPECTED_TOOLS = {
     "remote_fs_bin_write",
     "remote_upload",
     "remote_download",
+    "remote_sysinfo",
 }
 
 

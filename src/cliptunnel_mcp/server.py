@@ -284,6 +284,14 @@ def fs_find(path: str, pattern: str) -> str | None:
     )
 
 
+def sysinfo() -> str | None:
+    """Collect system information from the remote machine."""
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({"op": "sysinfo"}))
+
+
 def fs_bin_read(path: str) -> str | None:
     """Read a binary file on the remote machine, base64-encoded as JSON."""
     controller = _get_controller()
@@ -398,6 +406,15 @@ def create_server():
         """Search for a regex pattern in a file on the remote machine;
         returns matching lines as JSON ``[{"line", "content"}]``."""
         return _send(fs_search, path, pattern)
+
+    # ── System info ───────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def remote_sysinfo() -> str:
+        """Return system information from the remote machine: OS, hostname,
+        architecture, Python version, cliptunnel-mcp version, CPU count,
+        memory, disk, current user, and working directory."""
+        return _send(sysinfo)
 
     @mcp.tool()
     def remote_fs_find(path: str, pattern: str) -> str:
