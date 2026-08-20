@@ -16,20 +16,31 @@ The core package has zero dependencies. The MCP server requires the optional `[s
 
 ## Architecture
 
-```
- ┌──────────────────────────┐          ┌──────────────────────────┐
- │   Operator machine       │          │   Locked-down machine    │
- │                          │          │                          │
- │  MCP client ──► Server   │          │                          │
- │  (Claude, Pi, …)  │      │          │                          │
- │                   │      │          │                          │
- │        Controller ─┼──────┼──────────┼──► Agent ──► dispatch    │
- │  (send_command)   │      │  CT1     │  (ACK → process → R/E)  │
- │                   │      │  wire    │                          │
- │                   │      │  over    │                          │
- │                   │      │ clipboard│                          │
- │                   │      │  slot    │                          │
- └──────────────────────────┘          ┌──────────────────────────┘
+```mermaid
+graph LR
+  subgraph Operator["Operator machine"]
+    Client["MCP client<br/>(Claude, Pi, Cursor, …)"]
+    Server["MCP server<br/>(cliptunnel-mcp)"]
+    Controller["Controller<br/>send_command → Future"]
+    CT1["ClipboardTransport<br/>(OS clipboard)"]
+  end
+
+  subgraph Remote["Locked-down machine"]
+    CT2["ClipboardTransport<br/>(OS clipboard)"]
+    Agent["Agent<br/>ACK → process → R/E"]
+    Dispatch["dispatch<br/>shell · fs · bin"]
+  end
+
+  Client -- "MCP / stdio" --> Server
+  Server --> Controller
+  Controller -- "CT1 wire" --> CT1
+  CT1 -- "clipboard slot<br/>(last-writer-wins)" --> CT2
+  CT2 --> Agent
+  Agent --> Dispatch
+  Dispatch -- "response" --> Agent
+  Agent -- "CT1 wire" --> CT2
+  CT2 -- "clipboard slot" --> CT1
+  CT1 --> Controller
 ```
 
 Both endpoints share a single last-writer-wins clipboard slot. The protocol uses stop-and-wait ARQ: the Controller writes one command, the Agent ACKs immediately, processes the command in a worker pool, then writes one typed response (R or E) and retransmits it until the Controller's matching ACK arrives. The Controller sends one command at a time and resolves futures as responses come back.
