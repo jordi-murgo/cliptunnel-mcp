@@ -11,7 +11,7 @@ replaced by constructor injection — this module never imports clipboard code.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
 """
-from __future__ import annotations
+import logging
 
 import concurrent.futures
 import queue
@@ -30,8 +30,17 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.transport import Transport
 
+
+logger = logging.getLogger("cliptunnel-agent")
+
 Handler = Callable[[str], tuple[str, bool]]
-"""Processes a command payload, returning ``(output, is_error)``."""
+
+
+def _truncate(s: str, maxlen: int = 120) -> str:
+    """Truncate a string for logging, showing the start and length."""
+    if len(s) <= maxlen:
+        return s
+    return s[:maxlen] + f"... ({len(s)} bytes total)"
 
 
 def _slot_revision(transport: Transport) -> int:
@@ -158,6 +167,7 @@ class Agent:
                     self._pending_response is not None
                     and self._pending_response[0] == msg.seq
                 ):
+                    logger.debug("ack recv seq=%d — response released", msg.seq)
                     self._pending_response = None
                     self._response_condition.notify_all()
                 self._last_raw = raw
@@ -169,6 +179,8 @@ class Agent:
             return
 
         # ACK immediately — frees the slot for the Controller.
+        logger.info("recv cmd seq=%d payload=%s", msg.seq, _truncate(msg.payload))
+        logger.debug("acking seq=%d", msg.seq)
         self._write_slot_safe(pack(Message(
             frm=Role.AGENT.value,
             to=Role.CONTROLLER.value,
@@ -198,11 +210,17 @@ class Agent:
 
     def _process_and_enqueue(self, msg: Message) -> None:
         """Pool worker: run the handler and enqueue the typed response."""
+        logger.info("exec seq=%d", msg.seq)
         try:
             output, is_error = self._handler(msg.payload)
         except Exception as exc:
+            logger.warning("exec seq=%d error: %s", msg.seq, _truncate(str(exc)))
             output, is_error = str(exc), True
         self.tracker.mark_done(msg.seq, output, is_error)
+        logger.info(
+            "done seq=%d %s output=%s",
+            msg.seq, "ERROR" if is_error else "OK", _truncate(output),
+        )
         self._response_queue.put((msg.seq, output, is_error))
 
     def _response_dispatcher(self) -> None:
@@ -214,6 +232,8 @@ class Agent:
                 continue
             if not self._running or seq == -1:
                 break
+
+            logger.debug("send %s seq=%d", "ERR" if is_error else "RSP", seq)
 
             mtype = MsgType.ERROR.value if is_error else MsgType.RESPONSE.value
             wire = pack(Message(
@@ -253,13 +273,23 @@ def main() -> None:
     Builds a :class:`~cliptunnel_mcp.clipboard_transport.ClipboardTransport`
     backed by the system clipboard and wires :func:`cliptunnel_mcp.operations.dispatch`
     as the command handler, then blocks until interrupted.
+
+    Use ``--verbose`` or ``-v`` to enable DEBUG-level logging (ACKs, retransmits).
     """
+    import argparse
     import logging
     import signal
     import sys
 
+    parser = argparse.ArgumentParser(description="ClipTunnel agent")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="enable DEBUG-level logging (ACKs, retransmits, slot writes)",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )

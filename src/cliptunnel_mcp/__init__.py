@@ -13,7 +13,7 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.operations import dispatch
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 __all__ = [
     "PROTOCOL_SIG",
