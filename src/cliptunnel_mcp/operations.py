@@ -324,11 +324,8 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
     except Exception:
         info["agent_auth"] = "unknown"
 
-    # ── Shell version (Windows) ────────────────────────────────────
-    if platform.system() == "Windows":
-        info["shell_version"] = _windows_shell_version()
-    else:
-        info["shell_version"] = ""
+    # ── Shell version ───────────────────────────────────────────────
+    info["shell_version"] = _detect_shell_version()
 
     # ── CPU ─────────────────────────────────────────────────────────
     info["cpu_count"] = os.cpu_count() or 0
@@ -459,34 +456,61 @@ def _add_disk_info(info: dict) -> None:
         pass
 
 
-def _windows_shell_version() -> str:
-    """Detect the user's shell and its version on Windows.
+def _detect_shell_version() -> str:
+    """Detect the user's shell and its version on any platform.
 
-    Checks for PowerShell first (pwsh or powershell), then falls back to cmd.
-    Returns a string like 'PowerShell 7.4.0' or 'cmd 10.0.26100.1' or 'unknown'.
+    - Windows: PowerShell (pwsh/powershell) or cmd.exe
+    - macOS/Linux: the shell from $SHELL (bash, zsh, fish, etc.)
+
+    Returns a string like 'zsh 5.9', 'bash 5.2.21', 'PowerShell 7.4.0',
+    or 'unknown'.
     """
+    import platform
     import shutil
     try:
-        for pwsh in ("pwsh", "powershell"):
-            if shutil.which(pwsh):
-                result = subprocess.run(
-                    [pwsh, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
-                    capture_output=True, text=True, check=False, timeout=5,
-                )
-                if result.returncode == 0:
-                    ver = result.stdout.strip()
-                    label = "PowerShell" if pwsh == "pwsh" else "Windows PowerShell"
-                    return f"{label} {ver}" if ver else label
-        # Fallback: cmd.exe
+        system = platform.system()
+
+        if system == "Windows":
+            for pwsh in ("pwsh", "powershell"):
+                if shutil.which(pwsh):
+                    result = subprocess.run(
+                        [pwsh, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                        capture_output=True, text=True, check=False, timeout=5,
+                    )
+                    if result.returncode == 0:
+                        ver = result.stdout.strip()
+                        label = "PowerShell" if pwsh == "pwsh" else "Windows PowerShell"
+                        return f"{label} {ver}" if ver else label
+            result = subprocess.run(
+                ["cmd", "/c", "ver"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            if result.returncode == 0:
+                return f"cmd {result.stdout.strip()}"
+            return "unknown"
+
+        # macOS / Linux: use $SHELL
+        shell_path = os.environ.get("SHELL", "")
+        if not shell_path:
+            return "unknown"
+        shell_name = os.path.basename(shell_path)
+        # Query version: --version flag works for bash, zsh, fish, dash, sh
         result = subprocess.run(
-            ["cmd", "/c", "ver"],
+            [shell_path, "--version"],
             capture_output=True, text=True, check=False, timeout=5,
         )
         if result.returncode == 0:
-            return f"cmd {result.stdout.strip()}"
-        return "unknown"
+            first_line = result.stdout.strip().split("\n")[0]
+            # Extract version number from the first line
+            import re
+            ver_match = re.search(r"\d+\.\d+(?:\.\d+)?", first_line)
+            if ver_match:
+                return f"{shell_name} {ver_match.group()}"
+            return f"{shell_name} {first_line}"
+        return shell_name or "unknown"
     except Exception:
         return "unknown"
+
 # ── agent ────────────────────────────────────────────────────────────────────
 
 def op_agent(req: dict) -> tuple[str, bool]:
