@@ -1,4 +1,4 @@
-"""Controller endpoint (role C) of the ClipTunnel CT1 protocol.
+"""Controller endpoint (role C) of the ClipTunnel CT2 protocol.
 
 Runs on the operator's machine. Sends commands to the Agent through an
 injected slot-compatible :class:`~cliptunnel_mcp.transport.Transport` with
@@ -7,7 +7,7 @@ immediately while background threads dispatch commands serially and read
 responses.
 
 Ported from the hardened vulcano-helper Host (seq-bound ARQ, generation-safe
-semantics) with the role alphabet narrowed to {C, A} and the clipboard
+semantics) with the controller address 'C' and 8-hex remote IDs, and the clipboard
 replaced by constructor injection — this module never imports clipboard code.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
-from cliptunnel_mcp.protocol import Message, MsgType, Role, pack, unpack, validate
+from cliptunnel_mcp.protocol import BROADCAST_ADDR, CONTROLLER_ADDR, Message, MsgType, pack, unpack, validate
 from cliptunnel_mcp.transport import Transport
 
 _DEFAULT_SEQ_FILE = ".cliptunnel_controller_seq"
@@ -126,13 +126,15 @@ class Controller:
         self.poll_interval = poll_interval
         self.ack_timeout = ack_timeout
 
-        self._send_queue: queue.Queue[tuple[int, str]] = queue.Queue()
+        self._send_queue: queue.Queue[tuple[int, str, str | None]] = queue.Queue()
         self._futures: dict[int, concurrent.futures.Future] = {}
         self._futures_lock = threading.Lock()
         self._slot_lock = threading.RLock()
         self._slot_condition = threading.Condition(self._slot_lock)
         self._pending_command_seq: int | None = None
         self._last_write_time = 0.0
+        self._registry: dict[str, dict] = {}  # remote_id -> {sysinfo + last_seen + status}
+        self._registry_lock = threading.Lock()
         self._running = True
 
         self._dispatcher_thread = threading.Thread(
@@ -141,12 +143,81 @@ class Controller:
         self._reader_thread = threading.Thread(
             target=self._reader, name="cliptunnel-controller-reader", daemon=True
         )
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, name="cliptunnel-controller-keepalive", daemon=True
+        )
         self._dispatcher_thread.start()
         self._reader_thread.start()
+        self._keepalive_thread.start()
+        # Broadcast register to discover existing remotes
+        self._send_broadcast_register()
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def send_command(self, command: str) -> concurrent.futures.Future:
+    def _send_broadcast_register(self) -> None:
+        """Broadcast a register command to discover remotes."""
+        self.seq += 1
+        seq = self.seq
+        if self._store is not None:
+            self._store.save(seq)
+        wire = pack(Message(
+            frm=CONTROLLER_ADDR,
+            to=BROADCAST_ADDR,
+            seq=seq,
+            mtype=MsgType.COMMAND.value,
+            payload=json.dumps({"op": "register"}),
+        ))
+        with self._slot_lock:
+            self._paced_write(wire)
+
+    def _get_default_remote(self) -> str:
+        """Return first alive remote ID, or broadcast if none."""
+        with self._registry_lock:
+            for rid, info in self._registry.items():
+                if info.get("status") == "alive":
+                    return rid
+        return BROADCAST_ADDR
+
+    def get_connections(self) -> dict:
+        """Return a copy of the remote registry with last_seen_ago."""
+        now = time.time()
+        with self._registry_lock:
+            result = {}
+            for rid, info in self._registry.items():
+                entry = dict(info)
+                entry["last_seen_ago"] = round(now - info.get("last_seen", 0), 1)
+                result[rid] = entry
+            return result
+
+    def _keepalive_loop(self) -> None:
+        """Background thread: ping idle remotes, mark dead ones."""
+        while self._running:
+            time.sleep(10)
+            if not self._running:
+                break
+            now = time.time()
+            with self._registry_lock:
+                for remote_id, info in list(self._registry.items()):
+                    last_seen = info.get("last_seen", 0)
+                    idle = now - last_seen
+                    if idle > 120:
+                        info["status"] = "dead"
+                    elif idle > 60 and info.get("status") == "alive":
+                        self.seq += 1
+                        ping_seq = self.seq
+                        if self._store is not None:
+                            self._store.save(ping_seq)
+                        wire = pack(Message(
+                            frm=CONTROLLER_ADDR,
+                            to=remote_id,
+                            seq=ping_seq,
+                            mtype=MsgType.PING.value,
+                            payload="",
+                        ))
+                        with self._slot_lock:
+                            self._paced_write(wire)
+
+    def send_command(self, command: str, remote_id: str | None = None) -> concurrent.futures.Future:
         """Send *command* asynchronously — returns a Future immediately.
 
         The Future resolves with the response payload (str) on success, or
@@ -159,16 +230,17 @@ class Controller:
         future: concurrent.futures.Future = concurrent.futures.Future()
         with self._futures_lock:
             self._futures[seq] = future
-        self._send_queue.put((seq, command))
+        self._send_queue.put((seq, command, remote_id))
         return future
 
-    def send_command_sync(self, command: str) -> str | None:
+    def send_command_sync(self, command: str, remote_id: str | None = None) -> str | None:
         """Send *command* and block until response or *timeout* seconds."""
-        future = self.send_command(command)
+        future = self.send_command(command, remote_id=remote_id)
         try:
             return future.result(timeout=self.timeout)
         except concurrent.futures.TimeoutError:
             return None
+
 
     def close(self) -> None:
         """Stop background threads. Idempotent; never strands a thread."""
@@ -177,9 +249,10 @@ class Controller:
                 return
             self._running = False
             self._slot_condition.notify_all()
-        self._send_queue.put((-1, ""))
+        self._send_queue.put((-1, "", None))
         self._dispatcher_thread.join(timeout=2.0)
         self._reader_thread.join(timeout=2.0)
+        self._keepalive_thread.join(timeout=2.0)
 
     # ── Background threads ───────────────────────────────────────────
 
@@ -187,19 +260,20 @@ class Controller:
         """Serial dispatcher: write one command, wait for its exact release."""
         while self._running:
             try:
-                seq, command = self._send_queue.get(timeout=0.5)
+                seq, command, remote_id = self._send_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if not self._running or seq == -1:
                 break
 
+            to = remote_id if remote_id else self._get_default_remote()
             acked = False
             for _attempt in range(self.retries):
                 if not self._running:
                     break
                 wire = pack(Message(
-                    frm=Role.CONTROLLER.value,
-                    to=Role.AGENT.value,
+                    frm=CONTROLLER_ADDR,
+                    to=to,
                     seq=seq,
                     mtype=MsgType.COMMAND.value,
                     payload=command,
@@ -243,12 +317,17 @@ class Controller:
             if not raw or raw == last_raw:
                 continue
             last_raw = raw
-            if not validate(raw, Role.CONTROLLER):
+            if not validate(raw, CONTROLLER_ADDR):
                 continue
             msg = unpack(raw)
             if msg is None:
                 continue
 
+            # Track remote presence for any message from a remote.
+            if msg.frm != CONTROLLER_ADDR:
+                with self._registry_lock:
+                    if msg.frm in self._registry:
+                        self._registry[msg.frm]["last_seen"] = time.time()
             if msg.mtype == MsgType.ACK.value:
                 with self._slot_condition:
                     if self._pending_command_seq == msg.seq:
@@ -256,19 +335,40 @@ class Controller:
                         self._slot_condition.notify_all()
 
             elif msg.mtype in (MsgType.RESPONSE.value, MsgType.ERROR.value):
-                # Skip stale messages from a previous Controller session.
-                if msg.seq <= self._min_seq:
-                    continue
+                # Registration responses use seq=0 and must bypass the stale
+                # filter — they are unsolicited, not replies to a command.
+                is_registration = (
+                    msg.mtype == MsgType.RESPONSE.value
+                    and msg.frm != CONTROLLER_ADDR
+                    and msg.seq == 0
+                )
+                if not is_registration:
+                    # Skip stale messages from a previous Controller session.
+                    if msg.seq <= self._min_seq:
+                        continue
                 # A same-seq R/E subsumes the command ACK; unrelated traffic
                 # never releases the pending command.
                 with self._slot_condition:
                     if self._pending_command_seq == msg.seq:
                         self._pending_command_seq = None
                         self._slot_condition.notify_all()
-                # ACK the response back so the Agent stops retransmitting.
+                # Check for registration response (payload with "os" field).
+                if msg.mtype == MsgType.RESPONSE.value and msg.frm != CONTROLLER_ADDR:
+                    try:
+                        parsed = json.loads(msg.payload)
+                        if isinstance(parsed, dict) and "os" in parsed:
+                            with self._registry_lock:
+                                self._registry[msg.frm] = {
+                                    **parsed,
+                                    "last_seen": time.time(),
+                                    "status": "alive",
+                                }
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                # ACK the response back so the remote stops retransmitting.
                 self._paced_write(pack(Message(
-                    frm=Role.CONTROLLER.value,
-                    to=Role.AGENT.value,
+                    frm=CONTROLLER_ADDR,
+                    to=msg.frm,
                     seq=msg.seq,
                     mtype=MsgType.ACK.value,
                     payload="",
