@@ -146,11 +146,13 @@ class Agent:
             payload=sysinfo_result,
         ))
         self._write_slot_safe(wire)
+        logger.info("registration sent (remote_id=%s)", self.remote_id)
 
     def _schedule_registration(self, delay: float | None = None) -> None:
         """Schedule a registration response after a random delay."""
         import random
         d = delay if delay is not None else random.uniform(0.1, 4.0)
+        logger.info("scheduling registration in %.1fs (remote_id=%s)", d, self.remote_id)
         def _delayed() -> None:
             time.sleep(d)
             if self._running:
@@ -195,6 +197,7 @@ class Agent:
 
         # Respond to ping immediately with an ACK — no processing.
         if msg.mtype == MsgType.PING.value:
+            logger.info("ping recv seq=%d — sending ACK", msg.seq)
             self._write_slot_safe(pack(Message(
                 frm=self.remote_id,
                 to=CONTROLLER_ADDR,
@@ -231,6 +234,7 @@ class Agent:
             except Exception:
                 req = {}
             if isinstance(req, dict) and req.get("op") == "register":
+                logger.info("broadcast register received — scheduling registration")
                 self._last_raw = raw
                 self._schedule_registration()
                 return
@@ -357,10 +361,8 @@ def main() -> None:
     from cliptunnel_mcp.operations import dispatch as handler
 
     logger.info("starting agent on local OS clipboard")
-    transport = ClipboardTransport()
-    logger.info("clipboard transport ready (revision=%d)", transport.revision)
     agent = Agent(transport, handler)
-    logger.info("agent running — press Ctrl+C to stop")
+    logger.info("agent running — remote_id=%s — press Ctrl+C to stop", agent.remote_id)
 
     # Send unsolicited registration on startup.
     agent._schedule_registration()
