@@ -17,10 +17,9 @@ stdout is the JSON-RPC channel.
 Tool mapping from vulcano-helper ``vdi_mcp_server.py``: ``vdi_shell`` →
 ``remote_shell``, ``vdi_shell_result`` → ``remote_shell_result``,
 ``vdi_fs_*`` → ``remote_fs_*``, ``vdi_upload`` → ``remote_upload``,
-``vdi_download`` → ``remote_download``. The Vulcano-specific
-``vdi_agent_*`` copilot session tools are intentionally not ported. Because
-the remote peer is the Agent, error strings say "Agent" where vulcano said
-"VDI".
+``vdi_agent_*`` → ``remote_agent_*`` copilot session tools, with GitHub
+OAuth Device Flow login. Because the remote peer is the Agent, error
+strings say "Agent" where vulcano said "VDI".
 
 This package's core ships no clipboard transport: production callers inject
 a wired Controller via :func:`set_controller` before (or while) the server
@@ -332,6 +331,129 @@ def download(remote_path: str, local_path: str) -> str | None:
         f.write(data)
     return f"downloaded {len(data)} bytes to {local_path}"
 
+# ── Agent helpers (Controller-side, before create_server) ────────────────
+
+def agent_login() -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({"op": "agent", "action": "login"}))
+
+
+def agent_login_status() -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({"op": "agent", "action": "login_status"}))
+
+
+def agent_models() -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    # Write the script to remote and run it (avoids shell quoting issues)
+    script = (
+        'import json, ssl, urllib.request\n'
+        'OAUTH = open(".copilot_agent_token").read().strip()\n'
+        'ctx = ssl.create_default_context()\n'
+        'req = urllib.request.Request("https://api.github.com/copilot_internal/v2/token")\n'
+        'req.add_header("Authorization", f"token {OAUTH}")\n'
+        'req.add_header("Accept", "application/json")\n'
+        'req.add_header("Copilot-Integration-Id", "vscode-chat")\n'
+        'req.add_header("Editor-Version", "vscode/1.99.0")\n'
+        'r = urllib.request.urlopen(req, timeout=10, context=ctx)\n'
+        'td = json.loads(r.read().decode())\n'
+        'token = td["token"]\n'
+        'req = urllib.request.Request("https://api.individual.githubcopilot.com/models")\n'
+        'req.add_header("Authorization", f"Bearer {token}")\n'
+        'req.add_header("Editor-Version", "vscode/1.99.0")\n'
+        'req.add_header("Copilot-Integration-Id", "vscode-chat")\n'
+        'r = urllib.request.urlopen(req, timeout=15, context=ctx)\n'
+        'resp = json.loads(r.read().decode())\n'
+        'out = []\n'
+        'for x in resp.get("data", []):\n'
+        '    s = x.get("capabilities", {}).get("supports", {})\n'
+        '    out.append({\n'
+        '        "id": x.get("id", ""),\n'
+        '        "name": x.get("name", ""),\n'
+        '        "vendor": x.get("vendor", ""),\n'
+        '        "tools": s.get("tool_calls", False),\n'
+        '        "vision": s.get("vision", False),\n'
+        '        "streaming": s.get("streaming", False),\n'
+        '        "reasoning": s.get("reasoning_effort", None),\n'
+        '        "context_window": x.get("capabilities", {}).get("limits", {}).get("max_context_window_tokens", "?"),\n'
+        '        "endpoints": x.get("supported_endpoints", []),\n'
+        '        "enabled": x.get("model_picker_enabled", False),\n'
+        '    })\n'
+        'print(json.dumps(out))\n'
+    )
+    fs_write("_mcp_list_models.py", script)
+    return controller.send_command_sync(json.dumps({"op": "shell", "cmd": "python _mcp_list_models.py"}))
+
+
+def agent_start(task: str, model: str | None = None, context: str | None = None) -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    req: dict = {"op": "agent", "action": "start", "task": task}
+    if model:
+        req["model"] = model
+    if context:
+        req["system_prompt"] = context
+    return controller.send_command_sync(json.dumps(req))
+
+
+def agent_continue(session_id: str, message: str) -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "agent", "action": "continue", "session_id": session_id, "message": message,
+    }))
+
+
+def agent_result(session_id: str) -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "agent", "action": "result", "session_id": session_id,
+    }))
+
+
+def agent_status(session_id: str) -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "agent", "action": "status", "session_id": session_id,
+    }))
+
+
+def agent_clear(session_id: str) -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "agent", "action": "clear", "session_id": session_id,
+    }))
+
+
+def agent_end(session_id: str) -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "agent", "action": "end", "session_id": session_id,
+    }))
+
+
+def agent_list() -> str | None:
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({"op": "agent", "action": "list"}))
+
 
 # ── MCP Server ───────────────────────────────────────────────────────────────
 
@@ -448,6 +570,168 @@ def create_server():
         machine via base64 over the clipboard tunnel."""
         return _send(download, remote_path, local_path)
 
+
+    # ── Agent ──────────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def remote_agent_login() -> str:
+        """Start GitHub OAuth Device Flow login on the remote machine.
+
+        Returns a user_code and verification_uri. Open the verification_uri
+        in a browser and enter the user_code to authorize. The remote
+        machine polls for completion in the background.
+
+        Use remote_agent_login_status to check if login completed and
+        the gho_ token was saved.
+
+        Returns:
+            JSON with "user_code", "verification_uri", "status" ("polling"),
+            and "expires_in".
+        """
+        return _send(agent_login)
+
+    @mcp.tool()
+    def remote_agent_login_status() -> str:
+        """Check if GitHub OAuth Device Flow login completed.
+
+        Returns:
+            JSON with "status" ("done", "polling", "error", or "idle"),
+            "token_saved" (bool), and "error" (str or null).
+        """
+        return _send(agent_login_status)
+
+    @mcp.tool()
+    def remote_agent_models() -> str:
+        """List available Copilot models on the remote machine.
+
+        Returns all models accessible via the Copilot API, with their
+        capabilities (tools, vision, streaming, reasoning), context window
+        size, and supported endpoints.
+
+        Use this to choose a model for remote_agent_start.
+
+        Returns:
+            JSON array of model objects with id, name, vendor, capabilities,
+            context_window, and endpoints fields.
+        """
+        return _send(agent_models)
+
+    @mcp.tool()
+    def remote_agent_start(
+        task: str,
+        model: str | None = None,
+        context: str | None = None,
+    ) -> str:
+        """Start a new autonomous agent session on the remote machine.
+
+        The agent runs on the remote machine using the GitHub Copilot API.
+        It has access to shell and filesystem tools (shell, fs_read,
+        fs_write, fs_replace, fs_search, fs_list, fs_find) and will
+        autonomously execute the task.
+
+        The agent runs asynchronously — this returns immediately with
+        status="running". Use remote_agent_result to poll for the final
+        output.
+
+        Default model: mai-code-1.1-flash. Use remote_agent_models to see
+        all options.
+
+        Args:
+            task: The task description in natural language.
+            model: Optional model name (default: mai-code-1.1-flash).
+            context: Optional context string injected into the agent's
+                system prompt. Use this to provide project paths,
+                constraints, or instructions.
+
+        Returns:
+            JSON with "session_id" and "status" ("running"). Use
+            remote_agent_result to poll.
+        """
+        return _send(agent_start, task, model, context)
+
+    @mcp.tool()
+    def remote_agent_continue(session_id: str, message: str) -> str:
+        """Continue an existing agent session with a new message.
+
+        The agent retains context from previous messages in the session.
+        Returns immediately with status="running".
+
+        Args:
+            session_id: The session ID returned by remote_agent_start.
+            message: The new message to send to the agent.
+
+        Returns:
+            JSON with "session_id" and "status" ("running"). Use
+            remote_agent_result to poll.
+        """
+        return _send(agent_continue, session_id, message)
+
+    @mcp.tool()
+    def remote_agent_result(session_id: str) -> str:
+        """Poll for the result of an async agent session.
+
+        Returns immediately with the current status. If status is "done" or
+        "error", the result field contains the final output. If status is
+        "running", call again later.
+
+        Args:
+            session_id: The session ID returned by remote_agent_start.
+
+        Returns:
+            JSON with "session_id", "status", "result", and "message_count".
+        """
+        return _send(agent_result, session_id)
+
+    @mcp.tool()
+    def remote_agent_status(session_id: str) -> str:
+        """Get the status of an agent session.
+
+        Args:
+            session_id: The session ID to check.
+
+        Returns:
+            JSON with session_id, status, message_count, model, and
+            created_at.
+        """
+        return _send(agent_status, session_id)
+
+    @mcp.tool()
+    def remote_agent_clear(session_id: str) -> str:
+        """Clear the message history of an agent session (keeps the session
+        alive).
+
+        After clearing, the agent will not remember previous messages but
+        the session ID remains valid for new messages.
+
+        Args:
+            session_id: The session ID to clear.
+
+        Returns:
+            Confirmation or error message.
+        """
+        return _send(agent_clear, session_id)
+
+    @mcp.tool()
+    def remote_agent_end(session_id: str) -> str:
+        """End and destroy an agent session.
+
+        Args:
+            session_id: The session ID to end.
+
+        Returns:
+            Confirmation or error message.
+        """
+        return _send(agent_end, session_id)
+
+    @mcp.tool()
+    def remote_agent_list() -> str:
+        """List all active agent sessions on the remote machine.
+
+        Returns:
+            JSON array of session objects with session_id, status, and
+            model.
+        """
+        return _send(agent_list)
     return mcp
 
 

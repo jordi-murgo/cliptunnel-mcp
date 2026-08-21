@@ -6,8 +6,8 @@ JSON payload string and dispatches to the appropriate handler based on the
 a string and *is_error* is True on failure.
 
 Faithful port of vulcano-helper ``vdi_operations.py`` (same op names, JSON
-request/response shapes, and error strings) minus the Vulcano-specific
-``agent``/copilot session op.
+request/response shapes, and error strings), plus the ``agent`` copilot
+session op with GitHub OAuth Device Flow login.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
 """
@@ -53,6 +53,7 @@ def dispatch(payload: str) -> tuple[str, bool]:
         "fs.bin_read": op_fs_bin_read,
         "fs.bin_write": op_fs_bin_write,
         "sysinfo": op_sysinfo,
+        "agent": op_agent,
     }
 
     handler = handlers.get(op)
@@ -311,6 +312,21 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
     info["shell"] = os.environ.get("SHELL", "")
     info["home"] = os.path.expanduser("~")
 
+    # ── Agent auth ─────────────────────────────────────────────────
+    try:
+        token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
+        if os.path.isfile(token_path):
+            with open(token_path, "r") as _f:
+                _tok = _f.read().strip()
+            info["agent_auth"] = "authenticated" if _tok else "no_token"
+        else:
+            info["agent_auth"] = "no_token"
+    except Exception:
+        info["agent_auth"] = "unknown"
+
+    # ── Shell version ───────────────────────────────────────────────
+    info["shell_version"] = _detect_shell_version()
+
     # ── CPU ─────────────────────────────────────────────────────────
     info["cpu_count"] = os.cpu_count() or 0
 
@@ -438,3 +454,224 @@ def _add_disk_info(info: dict) -> None:
             info["disk_free"] = stat.f_bavail * stat.f_frsize
     except Exception:
         pass
+
+
+def _detect_shell_version() -> str:
+    """Detect the user's shell and its version on any platform.
+
+    - Windows: PowerShell (pwsh/powershell) or cmd.exe
+    - macOS/Linux: the shell from $SHELL (bash, zsh, fish, etc.)
+
+    Returns a string like 'zsh 5.9', 'bash 5.2.21', 'PowerShell 7.4.0',
+    or 'unknown'.
+    """
+    import platform
+    import shutil
+    try:
+        system = platform.system()
+
+        if system == "Windows":
+            for pwsh in ("pwsh", "powershell"):
+                if shutil.which(pwsh):
+                    result = subprocess.run(
+                        [pwsh, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                        capture_output=True, text=True, check=False, timeout=5,
+                    )
+                    if result.returncode == 0:
+                        ver = result.stdout.strip()
+                        label = "PowerShell" if pwsh == "pwsh" else "Windows PowerShell"
+                        return f"{label} {ver}" if ver else label
+            result = subprocess.run(
+                ["cmd", "/c", "ver"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            if result.returncode == 0:
+                return f"cmd {result.stdout.strip()}"
+            return "unknown"
+
+        # macOS / Linux: use $SHELL
+        shell_path = os.environ.get("SHELL", "")
+        if not shell_path:
+            return "unknown"
+        shell_name = os.path.basename(shell_path)
+        # Query version: --version flag works for bash, zsh, fish, dash, sh
+        result = subprocess.run(
+            [shell_path, "--version"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if result.returncode == 0:
+            first_line = result.stdout.strip().split("\n")[0]
+            # Extract version number from the first line
+            import re
+            ver_match = re.search(r"\d+\.\d+(?:\.\d+)?", first_line)
+            if ver_match:
+                return f"{shell_name} {ver_match.group()}"
+            return f"{shell_name} {first_line}"
+        return shell_name or "unknown"
+    except Exception:
+        return "unknown"
+
+# ── agent ────────────────────────────────────────────────────────────────────
+
+def op_agent(req: dict) -> tuple[str, bool]:
+    """Handle agent operations with async session management.
+
+    Actions: start, continue, result, status, clear, end, list,
+    login, login_status.
+
+    agent.start and agent.continue are non-blocking — they launch the agent
+    in a background thread and return immediately with status="running".
+    Use agent.result to poll for the final result.
+    """
+    from cliptunnel_mcp.agent_session import (
+        SessionManager, start_agent_async, DEFAULT_SYSTEM_PROMPT,
+    )
+    from cliptunnel_mcp.copilot_client import CopilotClient
+
+    # Global state (persists across calls within the Agent process)
+    if not hasattr(op_agent, "_sessions"):
+        op_agent._sessions = SessionManager()
+    if not hasattr(op_agent, "_client"):
+        op_agent._client = CopilotClient()
+    if not hasattr(op_agent, "_login_state"):
+        op_agent._login_state = {"status": "idle", "token_saved": False, "error": None}
+
+    sessions = op_agent._sessions
+    client = op_agent._client
+
+    action = req.get("action", "start")
+
+    if action == "list":
+        result = []
+        for sid in sessions.list():
+            s = sessions.get(sid)
+            if s:
+                result.append({"session_id": sid, "status": s.status, "model": s.model})
+        return (json.dumps(result), False)
+
+    if action == "start":
+        task = req.get("task", "")
+        model = req.get("model", "mai-code-1.1-flash")
+        system_prompt = req.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        sid = sessions.create(model=model)
+        session = sessions.get(sid)
+        start_agent_async(session, task, client, system_prompt=system_prompt)
+        return (json.dumps({"session_id": sid, "status": "running"}), False)
+
+    if action == "continue":
+        sid = req.get("session_id", "")
+        message = req.get("message", "")
+        session = sessions.get(sid)
+        if session is None:
+            return (f"session not found: {sid}", True)
+        if session.status == "running":
+            return (json.dumps({"session_id": sid, "status": "running", "error": "agent is still running"}), False)
+        start_agent_async(session, message, client)
+        return (json.dumps({"session_id": sid, "status": "running"}), False)
+
+    if action == "result":
+        sid = req.get("session_id", "")
+        session = sessions.get(sid)
+        if session is None:
+            return (f"session not found: {sid}", True)
+        return (json.dumps({
+            "session_id": sid,
+            "status": session.status,
+            "result": session.result,
+            "message_count": len(session.messages),
+        }), False)
+
+    if action == "status":
+        sid = req.get("session_id", "")
+        session = sessions.get(sid)
+        if session is None:
+            return (f"session not found: {sid}", True)
+        return (json.dumps({
+            "session_id": sid,
+            "status": session.status,
+            "message_count": len(session.messages),
+            "model": session.model,
+            "created_at": session.created_at,
+        }), False)
+
+    if action == "clear":
+        sid = req.get("session_id", "")
+        if sessions.clear(sid):
+            return (f"cleared session {sid}", False)
+        return (f"session not found: {sid}", True)
+
+    if action == "end":
+        sid = req.get("session_id", "")
+        if sessions.end(sid):
+            return (f"ended session {sid}", False)
+        return (f"session not found: {sid}", True)
+
+    if action == "login":
+        import threading
+
+        flow = client.start_device_flow()
+        device_code = flow.get("device_code", "")
+        interval = flow.get("interval", 5)
+        op_agent._login_state = {
+            "device_code": device_code,
+            "status": "polling",
+            "token_saved": False,
+            "error": None,
+        }
+
+        def _poll_loop(dev_code: str, poll_interval: int) -> None:
+            import time as _time
+
+            while op_agent._login_state.get("status") == "polling":
+                _time.sleep(poll_interval)
+                try:
+                    resp = client.poll_device_flow(dev_code)
+                except Exception as exc:
+                    op_agent._login_state["status"] = "error"
+                    op_agent._login_state["error"] = str(exc)
+                    return
+                if "access_token" in resp:
+                    token = resp["access_token"]
+                    try:
+                        client.save_oauth_token(token)
+                    except Exception as exc:
+                        op_agent._login_state["status"] = "error"
+                        op_agent._login_state["error"] = str(exc)
+                        return
+                    op_agent._login_state["status"] = "done"
+                    op_agent._login_state["token_saved"] = True
+                    return
+                err = resp.get("error", "")
+                if err == "authorization_pending":
+                    continue
+                if err == "slow_down":
+                    poll_interval += 5
+                    continue
+                # Any other error (expired_token, access_denied, etc.)
+                op_agent._login_state["status"] = "error"
+                op_agent._login_state["error"] = err
+                return
+
+        t = threading.Thread(
+            target=_poll_loop,
+            args=(device_code, interval),
+            daemon=True,
+        )
+        t.start()
+
+        return (json.dumps({
+            "user_code": flow.get("user_code", ""),
+            "verification_uri": flow.get("verification_uri", ""),
+            "status": "polling",
+            "expires_in": flow.get("expires_in", 900),
+        }), False)
+
+    if action == "login_status":
+        state = op_agent._login_state
+        return (json.dumps({
+            "status": state.get("status", "idle"),
+            "token_saved": state.get("token_saved", False),
+            "error": state.get("error"),
+        }), False)
+
+    return (f"unknown agent action: {action}", True)

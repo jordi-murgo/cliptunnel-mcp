@@ -29,3 +29,6 @@ Thumbs.db
 
 # ClipTunnel runtime state
 .cliptunnel_controller_seq
+
+# Copilot agent OAuth token
+.copilot_agent_token
