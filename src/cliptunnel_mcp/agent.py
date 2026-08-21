@@ -1,13 +1,13 @@
-"""Agent endpoint (role A) of the ClipTunnel CT1 protocol.
+"""Agent endpoint of the ClipTunnel CT2 protocol.
 
 Runs on the locked-down remote machine. Watches an injected slot-compatible
 :class:`~cliptunnel_mcp.transport.Transport` for commands, ACKs them
 immediately, processes them in a worker pool, and writes one typed response
 at a time — retransmitting it byte-identically until its exact ACK arrives.
 
-Ported from the hardened vulcano-helper VDI (seq-bound ARQ, generation-safe
-semantics) with the role alphabet narrowed to {C, A} and the clipboard
-replaced by constructor injection — this module never imports clipboard code.
+Each agent generates a random 8-hex remote ID and responds only to messages
+addressed to that ID or to the broadcast address. On startup and on broadcast
+register commands it sends a registration response with sysinfo.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
 """
@@ -20,10 +20,12 @@ import time
 from collections.abc import Callable
 
 from cliptunnel_mcp.protocol import (
+    BROADCAST_ADDR,
+    CONTROLLER_ADDR,
     Message,
     MsgType,
-    Role,
     SeqTracker,
+    generate_remote_id,
     pack,
     unpack,
     validate,
@@ -90,6 +92,7 @@ class Agent:
         max_workers: int = 5,
         response_ack_timeout: float = 1.0,
     ) -> None:
+        self.remote_id = generate_remote_id()
         self.tracker = SeqTracker()
         self.poll_interval = poll_interval
         self.response_ack_timeout = response_ack_timeout
@@ -130,6 +133,30 @@ class Agent:
         self._reader_thread.join(timeout=2.0)
         self._pool.shutdown(wait=False, cancel_futures=True)
 
+    def send_registration(self) -> None:
+        """Send a registration response with current sysinfo to the controller."""
+        import json
+        from cliptunnel_mcp.operations import dispatch
+        sysinfo_result, _ = dispatch(json.dumps({"op": "sysinfo"}))
+        wire = pack(Message(
+            frm=self.remote_id,
+            to=CONTROLLER_ADDR,
+            seq=0,
+            mtype=MsgType.RESPONSE.value,
+            payload=sysinfo_result,
+        ))
+        self._write_slot_safe(wire)
+
+    def _schedule_registration(self, delay: float | None = None) -> None:
+        """Schedule a registration response after a random delay."""
+        import random
+        d = delay if delay is not None else random.uniform(0.1, 4.0)
+        def _delayed() -> None:
+            time.sleep(d)
+            if self._running:
+                self.send_registration()
+        threading.Thread(target=_delayed, daemon=True, name="cliptunnel-register").start()
+
     # ── Background threads ───────────────────────────────────────────
 
     def _reader(self) -> None:
@@ -151,12 +178,30 @@ class Agent:
         if raw == self._last_raw:
             return
 
-        if not validate(raw, Role.AGENT):
+        if not validate(raw, self.remote_id):
             self._last_raw = raw
             return
 
         msg = unpack(raw)
         if msg is None:
+            self._last_raw = raw
+            return
+
+        # Ignore messages addressed to another remote (validate already
+        # checks that the message is for us or broadcast, but be explicit).
+        if msg.to != self.remote_id and msg.to != BROADCAST_ADDR:
+            self._last_raw = raw
+            return
+
+        # Respond to ping immediately with an ACK — no processing.
+        if msg.mtype == MsgType.PING.value:
+            self._write_slot_safe(pack(Message(
+                frm=self.remote_id,
+                to=CONTROLLER_ADDR,
+                seq=msg.seq,
+                mtype=MsgType.ACK.value,
+                payload="",
+            )))
             self._last_raw = raw
             return
 
@@ -178,12 +223,25 @@ class Agent:
             self._last_raw = raw
             return
 
+        # Broadcast register: schedule a delayed registration response, no ACK.
+        if msg.to == BROADCAST_ADDR:
+            try:
+                import json as _json
+                req = _json.loads(msg.payload) if msg.payload else {}
+            except Exception:
+                req = {}
+            if isinstance(req, dict) and req.get("op") == "register":
+                self._last_raw = raw
+                self._schedule_registration()
+                return
+            # Other broadcast commands: fall through to normal ACK + process.
+
         # ACK immediately — frees the slot for the Controller.
         logger.info("recv cmd seq=%d payload=%s", msg.seq, _truncate(msg.payload))
         logger.debug("acking seq=%d", msg.seq)
         self._write_slot_safe(pack(Message(
-            frm=Role.AGENT.value,
-            to=Role.CONTROLLER.value,
+            frm=self.remote_id,
+            to=CONTROLLER_ADDR,
             seq=msg.seq,
             mtype=MsgType.ACK.value,
             payload="",
@@ -237,8 +295,8 @@ class Agent:
 
             mtype = MsgType.ERROR.value if is_error else MsgType.RESPONSE.value
             wire = pack(Message(
-                frm=Role.AGENT.value,
-                to=Role.CONTROLLER.value,
+                frm=self.remote_id,
+                to=CONTROLLER_ADDR,
                 seq=seq,
                 mtype=mtype,
                 payload=payload,
@@ -303,6 +361,9 @@ def main() -> None:
     logger.info("clipboard transport ready (revision=%d)", transport.revision)
     agent = Agent(transport, handler)
     logger.info("agent running — press Ctrl+C to stop")
+
+    # Send unsolicited registration on startup.
+    agent._schedule_registration()
 
     def _shutdown(signum: int, frame: object) -> None:
         logger.info("received signal %d, shutting down", signum)

@@ -309,5 +309,25 @@ class TestFsBinWrite(unittest.TestCase):
             self.assertTrue(os.path.isfile(p))
 
 
+class TestRegister(unittest.TestCase):
+    """register operation — aliases sysinfo for agent registration."""
+
+    def test_register_returns_sysinfo(self):
+        out, err = dispatch(json.dumps({"op": "register"}))
+        self.assertFalse(err)
+        data = json.loads(out)
+        self.assertIn("os", data)
+        self.assertIn("hostname", data)
+        self.assertIn("python_version", data)
+
+    def test_register_returns_same_as_sysinfo(self):
+        reg_out, _ = dispatch(json.dumps({"op": "register"}))
+        sys_out, _ = dispatch(json.dumps({"op": "sysinfo"}))
+        reg_data = json.loads(reg_out)
+        sys_data = json.loads(sys_out)
+        # Same keys (values like mem_available may differ between calls)
+        self.assertEqual(set(reg_data.keys()), set(sys_data.keys()))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,30 +1,35 @@
 """cliptunnel-mcp — operate a locked-down remote machine through its clipboard."""
 from cliptunnel_mcp.controller import Controller
 from cliptunnel_mcp.protocol import (
+    BROADCAST_ADDR,
+    CONTROLLER_ADDR,
     PROTOCOL_SIG,
     PROTOCOL_VERSION,
     Message,
     MsgType,
-    Role,
     SeqTracker,
+    generate_remote_id,
     pack,
     unpack,
     validate,
 )
 from cliptunnel_mcp.operations import dispatch
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
-    "PROTOCOL_SIG",
-    "PROTOCOL_VERSION",
+    "BROADCAST_ADDR",
+    "CONTROLLER_ADDR",
     "Controller",
     "Message",
     "MsgType",
-    "Role",
+    "PROTOCOL_SIG",
+    "PROTOCOL_VERSION",
     "SeqTracker",
     "dispatch",
+    "generate_remote_id",
     "pack",
+    "unpack",
     "validate",
 ]
 

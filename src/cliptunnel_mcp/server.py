@@ -77,7 +77,7 @@ def _send(fn, *args, **kwargs) -> str:
 
 # ── Controller helpers (ported from vulcano-helper Host) ─────────────────────
 
-def shell_auto(cmd: str, sync_timeout: float = 10.0) -> dict:
+def shell_auto(cmd: str, sync_timeout: float = 10.0, remote_id: str | None = None) -> dict:
     """Send a shell command with auto-sync-then-async behavior.
 
     Waits up to *sync_timeout* seconds for the Agent to respond. If the
@@ -102,7 +102,7 @@ def shell_auto(cmd: str, sync_timeout: float = 10.0) -> dict:
             "error": "no transport configured (call set_controller first)",
         }
     future = controller.send_command(
-        json.dumps({"op": "shell", "cmd": cmd})
+        json.dumps({"op": "shell", "cmd": cmd}), remote_id=remote_id
     )
     try:
         result = future.result(timeout=sync_timeout)
@@ -219,107 +219,107 @@ def shell_result(job_id: str) -> dict:
         }
 
 
-def fs_read(path: str) -> str | None:
+def fs_read(path: str, remote_id: str | None = None) -> str | None:
     """Read a file on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "fs.read", "path": path}))
+    return controller.send_command_sync(json.dumps({"op": "fs.read", "path": path}), remote_id=remote_id)
 
 
-def fs_write(path: str, content: str) -> str | None:
+def fs_write(path: str, content: str, remote_id: str | None = None) -> str | None:
     """Create or overwrite a file on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(
-        json.dumps({"op": "fs.write", "path": path, "content": content})
+        json.dumps({"op": "fs.write", "path": path, "content": content}), remote_id=remote_id
     )
 
 
-def fs_list(path: str) -> str | None:
+def fs_list(path: str, remote_id: str | None = None) -> str | None:
     """List a directory on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "fs.list", "path": path}))
+    return controller.send_command_sync(json.dumps({"op": "fs.list", "path": path}), remote_id=remote_id)
 
 
-def fs_delete(path: str) -> str | None:
+def fs_delete(path: str, remote_id: str | None = None) -> str | None:
     """Delete a file on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "fs.delete", "path": path}))
+    return controller.send_command_sync(json.dumps({"op": "fs.delete", "path": path}), remote_id=remote_id)
 
 
-def fs_replace(path: str, old: str, new: str) -> str | None:
+def fs_replace(path: str, old: str, new: str, remote_id: str | None = None) -> str | None:
     """Replace text in a file on the remote machine (exact-once match)."""
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(
-        json.dumps({"op": "fs.replace", "path": path, "old": old, "new": new})
+        json.dumps({"op": "fs.replace", "path": path, "old": old, "new": new}), remote_id=remote_id
     )
 
 
-def fs_search(path: str, pattern: str) -> str | None:
+def fs_search(path: str, pattern: str, remote_id: str | None = None) -> str | None:
     """Search for a regex pattern in a file on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(
-        json.dumps({"op": "fs.search", "path": path, "pattern": pattern})
+        json.dumps({"op": "fs.search", "path": path, "pattern": pattern}), remote_id=remote_id
     )
 
 
-def fs_find(path: str, pattern: str) -> str | None:
+def fs_find(path: str, pattern: str, remote_id: str | None = None) -> str | None:
     """Find files matching a glob pattern on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(
-        json.dumps({"op": "fs.find", "path": path, "pattern": pattern})
+        json.dumps({"op": "fs.find", "path": path, "pattern": pattern}), remote_id=remote_id
     )
 
 
-def sysinfo() -> str | None:
+def sysinfo(remote_id: str | None = None) -> str | None:
     """Collect system information from the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "sysinfo"}))
+    return controller.send_command_sync(json.dumps({"op": "sysinfo"}), remote_id=remote_id)
 
 
-def fs_bin_read(path: str) -> str | None:
+def fs_bin_read(path: str, remote_id: str | None = None) -> str | None:
     """Read a binary file on the remote machine, base64-encoded as JSON."""
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "fs.bin_read", "path": path}))
+    return controller.send_command_sync(json.dumps({"op": "fs.bin_read", "path": path}), remote_id=remote_id)
 
 
-def fs_bin_write(path: str, b64: str) -> str | None:
+def fs_bin_write(path: str, b64: str, remote_id: str | None = None) -> str | None:
     """Write base64-encoded content to a binary file on the remote machine."""
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(
-        json.dumps({"op": "fs.bin_write", "path": path, "b64": b64})
+        json.dumps({"op": "fs.bin_write", "path": path, "b64": b64}), remote_id=remote_id
     )
 
 
-def upload(local_path: str, remote_path: str) -> str | None:
+def upload(local_path: str, remote_path: str, remote_id: str | None = None) -> str | None:
     """Upload a local binary file to the remote machine via base64."""
     with open(local_path, "rb") as f:
         data = f.read()
     encoded = base64.b64encode(data).decode("ascii")
-    return fs_bin_write(remote_path, encoded)
+    return fs_bin_write(remote_path, encoded, remote_id=remote_id)
 
 
-def download(remote_path: str, local_path: str) -> str | None:
+def download(remote_path: str, local_path: str, remote_id: str | None = None) -> str | None:
     """Download a binary file from the remote machine via base64."""
-    response = fs_bin_read(remote_path)
+    response = fs_bin_read(remote_path, remote_id=remote_id)
     if response is None:
         return None
     try:
@@ -333,21 +333,21 @@ def download(remote_path: str, local_path: str) -> str | None:
 
 # ── Agent helpers (Controller-side, before create_server) ────────────────
 
-def agent_login() -> str | None:
+def agent_login(remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "agent", "action": "login"}))
+    return controller.send_command_sync(json.dumps({"op": "agent", "action": "login"}), remote_id=remote_id)
 
 
-def agent_login_status() -> str | None:
+def agent_login_status(remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "agent", "action": "login_status"}))
+    return controller.send_command_sync(json.dumps({"op": "agent", "action": "login_status"}), remote_id=remote_id)
 
 
-def agent_models() -> str | None:
+def agent_models(remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
@@ -387,11 +387,11 @@ def agent_models() -> str | None:
         '    })\n'
         'print(json.dumps(out))\n'
     )
-    fs_write("_mcp_list_models.py", script)
-    return controller.send_command_sync(json.dumps({"op": "shell", "cmd": "python _mcp_list_models.py"}))
+    fs_write("_mcp_list_models.py", script, remote_id=remote_id)
+    return controller.send_command_sync(json.dumps({"op": "shell", "cmd": "python _mcp_list_models.py"}), remote_id=remote_id)
 
 
-def agent_start(task: str, model: str | None = None, context: str | None = None) -> str | None:
+def agent_start(task: str, model: str | None = None, context: str | None = None, remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
@@ -400,59 +400,59 @@ def agent_start(task: str, model: str | None = None, context: str | None = None)
         req["model"] = model
     if context:
         req["system_prompt"] = context
-    return controller.send_command_sync(json.dumps(req))
+    return controller.send_command_sync(json.dumps(req), remote_id=remote_id)
 
 
-def agent_continue(session_id: str, message: str) -> str | None:
+def agent_continue(session_id: str, message: str, remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(json.dumps({
         "op": "agent", "action": "continue", "session_id": session_id, "message": message,
-    }))
+    }), remote_id=remote_id)
 
 
-def agent_result(session_id: str) -> str | None:
+def agent_result(session_id: str, remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(json.dumps({
         "op": "agent", "action": "result", "session_id": session_id,
-    }))
+    }), remote_id=remote_id)
 
 
-def agent_status(session_id: str) -> str | None:
+def agent_status(session_id: str, remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(json.dumps({
         "op": "agent", "action": "status", "session_id": session_id,
-    }))
+    }), remote_id=remote_id)
 
 
-def agent_clear(session_id: str) -> str | None:
+def agent_clear(session_id: str, remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(json.dumps({
         "op": "agent", "action": "clear", "session_id": session_id,
-    }))
+    }), remote_id=remote_id)
 
 
-def agent_end(session_id: str) -> str | None:
+def agent_end(session_id: str, remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
     return controller.send_command_sync(json.dumps({
         "op": "agent", "action": "end", "session_id": session_id,
-    }))
+    }), remote_id=remote_id)
 
 
-def agent_list() -> str | None:
+def agent_list(remote_id: str | None = None) -> str | None:
     controller = _get_controller()
     if controller is None:
         return None
-    return controller.send_command_sync(json.dumps({"op": "agent", "action": "list"}))
+    return controller.send_command_sync(json.dumps({"op": "agent", "action": "list"}), remote_id=remote_id)
 
 
 # ── MCP Server ───────────────────────────────────────────────────────────────
@@ -470,7 +470,7 @@ def create_server():
     # ── Shell ────────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_shell(cmd: str, sync_timeout: float = 10.0) -> str:
+    def remote_shell(cmd: str, sync_timeout: float = 10.0, remote_id: str | None = None) -> str:
         """Execute a shell command on the remote machine (Agent side).
 
         Waits up to *sync_timeout* seconds (default 10) for the command to
@@ -480,7 +480,7 @@ def create_server():
         with remote_shell_result. The Agent-side operation enforces a 60 s
         subprocess timeout.
         """
-        return json.dumps(shell_auto(cmd, sync_timeout=sync_timeout))
+        return json.dumps(shell_auto(cmd, sync_timeout=sync_timeout, remote_id=remote_id))
 
     @mcp.tool()
     def remote_shell_result(job_id: str) -> str:
@@ -495,86 +495,98 @@ def create_server():
     # ── Filesystem ───────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_fs_read(path: str) -> str:
+    def remote_fs_read(path: str, remote_id: str | None = None) -> str:
         """Read a file on the remote machine and return JSON
         ``{"content", "lines"}``."""
-        return _send(fs_read, path)
+        return _send(fs_read, path, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_write(path: str, content: str) -> str:
+    def remote_fs_write(path: str, content: str, remote_id: str | None = None) -> str:
         """Write content to a file on the remote machine (creates or
         overwrites, parent dirs created as needed)."""
-        return _send(fs_write, path, content)
+        return _send(fs_write, path, content, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_list(path: str) -> str:
+    def remote_fs_list(path: str, remote_id: str | None = None) -> str:
         """List entries in a directory on the remote machine as a JSON array
         of ``{"name", "size", "is_dir"}``."""
-        return _send(fs_list, path)
+        return _send(fs_list, path, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_delete(path: str) -> str:
+    def remote_fs_delete(path: str, remote_id: str | None = None) -> str:
         """Delete a file on the remote machine."""
-        return _send(fs_delete, path)
+        return _send(fs_delete, path, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_replace(path: str, old: str, new: str) -> str:
+    def remote_fs_replace(path: str, old: str, new: str, remote_id: str | None = None) -> str:
         """Search and replace text in a file on the remote machine
         (exact-once match: zero or multiple matches error)."""
-        return _send(fs_replace, path, old, new)
+        return _send(fs_replace, path, old, new, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_search(path: str, pattern: str) -> str:
+    def remote_fs_search(path: str, pattern: str, remote_id: str | None = None) -> str:
         """Search for a regex pattern in a file on the remote machine;
         returns matching lines as JSON ``[{"line", "content"}]``."""
-        return _send(fs_search, path, pattern)
+        return _send(fs_search, path, pattern, remote_id=remote_id)
 
     # ── System info ───────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_sysinfo() -> str:
+    def remote_sysinfo(remote_id: str | None = None) -> str:
         """Return system information from the remote machine: OS, hostname,
         architecture, Python version, cliptunnel-mcp version, CPU count,
         memory, disk, current user, and working directory."""
-        return _send(sysinfo)
+        return _send(sysinfo, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_find(path: str, pattern: str) -> str:
+    def remote_connections() -> str:
+        """List all connected remotes with their sysinfo, last_seen, and status.
+
+        Returns JSON dict of remote_id -> {sysinfo fields, last_seen, status}.
+        status is 'alive' or 'dead'. last_seen is seconds since last message.
+        """
+        controller = _get_controller()
+        if controller is None:
+            return json.dumps({})
+        return json.dumps(controller.get_connections())
+
+    @mcp.tool()
+    def remote_fs_find(path: str, pattern: str, remote_id: str | None = None) -> str:
         """Find files matching a glob pattern (``**`` recurses) under a
         directory on the remote machine."""
-        return _send(fs_find, path, pattern)
+        return _send(fs_find, path, pattern, remote_id=remote_id)
 
     # ── Binary transfer ──────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_fs_bin_read(path: str) -> str:
+    def remote_fs_bin_read(path: str, remote_id: str | None = None) -> str:
         """Read a binary file on the remote machine; returns JSON
         ``{"path", "size", "b64"}`` with base64 content."""
-        return _send(fs_bin_read, path)
+        return _send(fs_bin_read, path, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_fs_bin_write(path: str, b64: str) -> str:
+    def remote_fs_bin_write(path: str, b64: str, remote_id: str | None = None) -> str:
         """Write base64-encoded content to a binary file on the remote
         machine."""
-        return _send(fs_bin_write, path, b64)
+        return _send(fs_bin_write, path, b64, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_upload(local_path: str, remote_path: str) -> str:
+    def remote_upload(local_path: str, remote_path: str, remote_id: str | None = None) -> str:
         """Upload a local binary file to the remote machine via base64 over
         the clipboard tunnel."""
-        return _send(upload, local_path, remote_path)
+        return _send(upload, local_path, remote_path, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_download(remote_path: str, local_path: str) -> str:
+    def remote_download(remote_path: str, local_path: str, remote_id: str | None = None) -> str:
         """Download a binary file from the remote machine to the local
         machine via base64 over the clipboard tunnel."""
-        return _send(download, remote_path, local_path)
+        return _send(download, remote_path, local_path, remote_id=remote_id)
 
 
     # ── Agent ──────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_agent_login() -> str:
+    def remote_agent_login(remote_id: str | None = None) -> str:
         """Start GitHub OAuth Device Flow login on the remote machine.
 
         Returns a user_code and verification_uri. Open the verification_uri
@@ -588,20 +600,20 @@ def create_server():
             JSON with "user_code", "verification_uri", "status" ("polling"),
             and "expires_in".
         """
-        return _send(agent_login)
+        return _send(agent_login, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_login_status() -> str:
+    def remote_agent_login_status(remote_id: str | None = None) -> str:
         """Check if GitHub OAuth Device Flow login completed.
 
         Returns:
             JSON with "status" ("done", "polling", "error", or "idle"),
             "token_saved" (bool), and "error" (str or null).
         """
-        return _send(agent_login_status)
+        return _send(agent_login_status, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_models() -> str:
+    def remote_agent_models(remote_id: str | None = None) -> str:
         """List available Copilot models on the remote machine.
 
         Returns all models accessible via the Copilot API, with their
@@ -614,13 +626,14 @@ def create_server():
             JSON array of model objects with id, name, vendor, capabilities,
             context_window, and endpoints fields.
         """
-        return _send(agent_models)
+        return _send(agent_models, remote_id=remote_id)
 
     @mcp.tool()
     def remote_agent_start(
         task: str,
         model: str | None = None,
         context: str | None = None,
+        remote_id: str | None = None,
     ) -> str:
         """Start a new autonomous agent session on the remote machine.
 
@@ -647,10 +660,10 @@ def create_server():
             JSON with "session_id" and "status" ("running"). Use
             remote_agent_result to poll.
         """
-        return _send(agent_start, task, model, context)
+        return _send(agent_start, task, model, context, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_continue(session_id: str, message: str) -> str:
+    def remote_agent_continue(session_id: str, message: str, remote_id: str | None = None) -> str:
         """Continue an existing agent session with a new message.
 
         The agent retains context from previous messages in the session.
@@ -664,10 +677,10 @@ def create_server():
             JSON with "session_id" and "status" ("running"). Use
             remote_agent_result to poll.
         """
-        return _send(agent_continue, session_id, message)
+        return _send(agent_continue, session_id, message, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_result(session_id: str) -> str:
+    def remote_agent_result(session_id: str, remote_id: str | None = None) -> str:
         """Poll for the result of an async agent session.
 
         Returns immediately with the current status. If status is "done" or
@@ -680,10 +693,10 @@ def create_server():
         Returns:
             JSON with "session_id", "status", "result", and "message_count".
         """
-        return _send(agent_result, session_id)
+        return _send(agent_result, session_id, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_status(session_id: str) -> str:
+    def remote_agent_status(session_id: str, remote_id: str | None = None) -> str:
         """Get the status of an agent session.
 
         Args:
@@ -693,10 +706,10 @@ def create_server():
             JSON with session_id, status, message_count, model, and
             created_at.
         """
-        return _send(agent_status, session_id)
+        return _send(agent_status, session_id, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_clear(session_id: str) -> str:
+    def remote_agent_clear(session_id: str, remote_id: str | None = None) -> str:
         """Clear the message history of an agent session (keeps the session
         alive).
 
@@ -709,10 +722,10 @@ def create_server():
         Returns:
             Confirmation or error message.
         """
-        return _send(agent_clear, session_id)
+        return _send(agent_clear, session_id, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_end(session_id: str) -> str:
+    def remote_agent_end(session_id: str, remote_id: str | None = None) -> str:
         """End and destroy an agent session.
 
         Args:
@@ -721,17 +734,17 @@ def create_server():
         Returns:
             Confirmation or error message.
         """
-        return _send(agent_end, session_id)
+        return _send(agent_end, session_id, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_agent_list() -> str:
+    def remote_agent_list(remote_id: str | None = None) -> str:
         """List all active agent sessions on the remote machine.
 
         Returns:
             JSON array of session objects with session_id, status, and
             model.
         """
-        return _send(agent_list)
+        return _send(agent_list, remote_id=remote_id)
     return mcp
 
 

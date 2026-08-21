@@ -2,7 +2,7 @@
 
 Builds a real Controller + Agent pair over the deterministic ClipboardSlot
 with the genuine operations dispatcher as the Agent handler, so every tool
-call travels the full CT1 protocol path (tool → Controller → slot → Agent →
+call travels the full CT2 protocol path (tool → Controller → slot → Agent →
 dispatch → response).  No clipboard hardware and no network.
 
 The MCP-specific tests are skipped (not errored) when the official ``mcp``
@@ -44,6 +44,7 @@ EXPECTED_TOOLS = {
     "remote_upload",
     "remote_download",
     "remote_sysinfo",
+    "remote_connections",
     "remote_agent_login",
     "remote_agent_login_status",
     "remote_agent_models",
@@ -96,11 +97,9 @@ class TestServerModuleLaziness(unittest.TestCase):
             env={**os.environ, "PYTHONPATH": src_dir},
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=10,
         )
-        self.assertEqual(
-            proc.returncode, 0, f"lazy import probe failed:\n{proc.stderr}"
-        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 @unittest.skipUnless(HAS_MCP, "mcp package not installed (cliptunnel-mcp[server])")
@@ -123,6 +122,7 @@ class ServerTestCase(unittest.TestCase):
             retries=3,
             poll_interval=0.001,
             initial_seq=0,
+            persist_seq=False,
         )
         server.set_controller(self.controller)
         self.mcp = server.create_server()
@@ -290,6 +290,39 @@ class TestFsTools(ServerTestCase):
         data = self.call_json("remote_shell", cmd="echo hi")
         self.assertEqual(data["status"], "error")
         self.assertIn("no transport configured", data["error"])
+
+
+class TestRemoteConnections(ServerTestCase):
+    def test_remote_connections_returns_json_dict(self):
+        """remote_connections returns a JSON dict (possibly empty or populated
+        after registration traffic settles)."""
+        result = self.call("remote_connections")
+        data = json.loads(result)
+        self.assertIsInstance(data, dict)
+
+    def test_remote_connections_without_controller_returns_empty(self):
+        """When no controller is configured, remote_connections returns {}."""
+        self.server.reset()
+        result = self.call("remote_connections")
+        self.assertEqual(json.loads(result), {})
+
+    def test_remote_connections_populated_after_registration(self):
+        """After the Agent registers (broadcast register → delayed response),
+        remote_connections should show the agent's remote_id with sysinfo."""
+        # Wait up to 5s for the registration to arrive (random delay 0.1–4.0s).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            result = self.call("remote_connections")
+            data = json.loads(result)
+            if self.agent.remote_id in data:
+                break
+            time.sleep(0.1)
+        data = json.loads(self.call("remote_connections"))
+        self.assertIn(self.agent.remote_id, data)
+        info = data[self.agent.remote_id]
+        self.assertIn("os", info)
+        self.assertEqual(info.get("status"), "alive")
+
 
 class TestAgentTools(ServerTestCase):
     def test_agent_list_returns_json(self):

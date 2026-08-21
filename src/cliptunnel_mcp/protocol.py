@@ -1,33 +1,35 @@
 """
-ClipTunnel Protocol v1 — shared protocol module.
+ClipTunnel Protocol v2 — shared protocol module.
 
-Wire format: CT1|<from>|<to>|<seq>|<type>|<payload>
+Wire format: CT2|<from>|<to>|<seq>|<type>|<payload>
 
-  CT1      protocol signature + version
-  from     C (Controller) or A (Agent)
-  to       C (Controller) or A (Agent)
+  CT2      protocol signature + version
+  from     C (Controller) or 8-char hex (remote ID)
+  to       C (Controller), * (broadcast), or 8-char hex (specific remote)
   seq      positive integer
-  type     C (command), R (response), E (error), A (ack)
+  type     C (command), R (response), E (error), A (ack), P (ping)
   payload  base64-encoded UTF-8
-
-Ported from the hardened vulcano-helper CB1 H/V clipboard protocol with the
-role alphabet narrowed to {C, A}; wire semantics are preserved.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
 """
 from __future__ import annotations
 
 import base64
+import re
+import secrets
 from dataclasses import dataclass
 from enum import Enum
 
-PROTOCOL_SIG = "CT1"
-PROTOCOL_VERSION = 1
+PROTOCOL_SIG = "CT2"
+PROTOCOL_VERSION = 2
 
+# Controller address
+CONTROLLER_ADDR = "C"
+# Broadcast address
+BROADCAST_ADDR = "*"
 
-class Role(str, Enum):
-    CONTROLLER = "C"
-    AGENT = "A"
+# 8-char hex ID pattern
+_HEX_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
 
 class MsgType(str, Enum):
@@ -35,24 +37,47 @@ class MsgType(str, Enum):
     RESPONSE = "R"
     ERROR = "E"
     ACK = "A"
+    PING = "P"
 
 
-_VALID_ROLES = frozenset(role.value for role in Role)
+_VALID_TYPES = frozenset(t.value for t in MsgType)
 
 
 @dataclass
 class Message:
     """A decoded clipboard-tunnel message."""
 
-    frm: str       # 'C' or 'A'
-    to: str        # 'C' or 'A'
+    frm: str       # 'C' or 8-char hex
+    to: str        # 'C', '*', or 8-char hex
     seq: int
-    mtype: str     # 'C', 'R', 'E', 'A'
+    mtype: str     # 'C', 'R', 'E', 'A', 'P'
     payload: str   # raw decoded UTF-8 string
 
 
+def generate_remote_id() -> str:
+    """Generate a random 8-char hex remote ID."""
+    return secrets.token_hex(4)
+
+
+def is_valid_address(addr: str) -> bool:
+    """True if *addr* is a valid CT2 address: 'C', '*', or 8-char hex."""
+    if addr == CONTROLLER_ADDR or addr == BROADCAST_ADDR:
+        return True
+    return bool(_HEX_ID_RE.match(addr))
+
+
+def is_controller(addr: str) -> bool:
+    """True if *addr* is the controller address 'C'."""
+    return addr == CONTROLLER_ADDR
+
+
+def is_broadcast(addr: str) -> bool:
+    """True if *addr* is the broadcast address '*'."""
+    return addr == BROADCAST_ADDR
+
+
 def pack(msg: Message) -> str:
-    """Serialize *msg* into the wire format ``CT1|from|to|seq|type|payload``.
+    """Serialize *msg* into the wire format ``CT2|from|to|seq|type|payload``.
 
     The payload is base64-encoded over UTF-8 bytes so that newlines, pipe
     characters, and arbitrary unicode survive the clipboard round-trip.
@@ -65,8 +90,9 @@ def unpack(raw: str) -> Message | None:
     """Parse a wire-format string back into a :class:`Message`.
 
     Returns ``None`` when the input is malformed, has the wrong number of
-    fields, an unknown signature (legacy CB1 included), a role outside
-    {C, A}, a non-integer seq, or invalid base64.
+    fields, an unknown signature, an invalid address (not 'C', '*', or
+    8-char hex), a non-integer seq, an unknown message type, or invalid
+    base64.
     """
     if not raw:
         return None
@@ -77,7 +103,11 @@ def unpack(raw: str) -> Message | None:
     sig, frm, to, seq_str, mtype, encoded = parts
     if sig != PROTOCOL_SIG:
         return None
-    if frm not in _VALID_ROLES or to not in _VALID_ROLES:
+    if not is_valid_address(frm):
+        return None
+    if not is_valid_address(to):
+        return None
+    if mtype not in _VALID_TYPES:
         return None
     try:
         seq = int(seq_str)
@@ -90,27 +120,26 @@ def unpack(raw: str) -> Message | None:
     return Message(frm=frm, to=to, seq=seq, mtype=mtype, payload=payload)
 
 
-def validate(raw: str, my_role: str) -> bool:
-    """Return True if *raw* is a well-formed message addressed to *my_role*.
+def validate(raw: str, my_id: str) -> bool:
+    """Return True if *raw* is a well-formed message addressed to *my_id*.
 
-    Accepts either a :class:`Role` enum or the raw one-char string ('C'/'A').
-    Rules:
-      - must start with ``CT1|``
-      - ``to`` must equal my role
-      - ``from`` must NOT equal my role (no self-addressed messages)
+    *my_id* is ``'C'`` for the controller or an 8-char hex string for a
+    remote. Rules:
+      - must start with ``CT2|``
+      - ``to`` must equal *my_id* or ``'*'`` (broadcast)
+      - ``from`` must NOT equal *my_id* (no self-addressed messages)
       - format must be valid (parseable by :func:`unpack`)
     """
-    role = my_role.value if isinstance(my_role, Role) else my_role
     if not raw or not raw.startswith(PROTOCOL_SIG + "|"):
         return False
     msg = unpack(raw)
     if msg is None:
         return False
-    if msg.to != role:
+    if msg.frm == my_id:
         return False
-    if msg.frm == role:
-        return False
-    return True
+    if msg.to == my_id or msg.to == BROADCAST_ADDR:
+        return True
+    return False
 
 
 class SeqTracker:

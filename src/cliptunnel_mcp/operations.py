@@ -53,6 +53,7 @@ def dispatch(payload: str) -> tuple[str, bool]:
         "fs.bin_read": op_fs_bin_read,
         "fs.bin_write": op_fs_bin_write,
         "sysinfo": op_sysinfo,
+        "register": op_sysinfo,
         "agent": op_agent,
     }
 

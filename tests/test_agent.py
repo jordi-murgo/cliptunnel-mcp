@@ -1,9 +1,7 @@
 """Agent endpoint behavior over a deterministic slot transport.
 
-Ported from vulcano-helper VDI semantics (tests/test_clipboard_transport.py
-VDISlotContracts + vdi.py), adapted to the CT1 {C, A} role alphabet and
-constructor injection: the handler, worker-pool size, and timeouts are all
-injectable and no clipboard code is imported.
+Adapted to the CT2 protocol: the Agent generates a random 8-hex remote_id,
+uses it in the frm field, and handles PING and broadcast register commands.
 """
 from __future__ import annotations
 
@@ -12,14 +10,21 @@ import time
 import unittest
 
 from cliptunnel_mcp import Agent
-from cliptunnel_mcp.protocol import Message, MsgType, Role, pack, unpack
+from cliptunnel_mcp.protocol import (
+    BROADCAST_ADDR,
+    CONTROLLER_ADDR,
+    Message,
+    MsgType,
+    pack,
+    unpack,
+)
 from tests.clipboard_slot import ClipboardSlot
 
 WORKER_PREFIX = "cliptunnel-agent-worker"
 
 
-def wire(frm: Role, to: Role, seq: int, kind: MsgType, payload: str = "") -> str:
-    return pack(Message(frm=frm.value, to=to.value, seq=seq, mtype=kind.value, payload=payload))
+def wire(frm: str, to: str, seq: int, kind: MsgType, payload: str = "") -> str:
+    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload))
 
 
 def is_message(value: str, kind: MsgType, seq: int) -> bool:
@@ -60,13 +65,18 @@ class AgentTestCase(unittest.TestCase):
         self.addCleanup(agent.close)
         return agent
 
-    def deliver_command(self, seq: int, payload: str = "work") -> None:
+    def deliver_command(self, agent: Agent, seq: int, payload: str = "work") -> None:
         self.slot.overwrite(
-            wire(Role.CONTROLLER, Role.AGENT, seq, MsgType.COMMAND, payload)
+            wire(CONTROLLER_ADDR, agent.remote_id, seq, MsgType.COMMAND, payload)
         )
 
 
 class TestAgentConstruction(AgentTestCase):
+    def test_constructor_generates_remote_id(self):
+        agent = self.make_agent()
+        self.assertEqual(len(agent.remote_id), 8)
+        self.assertTrue(all(c in "0123456789abcdef" for c in agent.remote_id))
+
     def test_constructor_with_injected_slot_writes_nothing(self):
         self.make_agent()
         self.assertEqual(
@@ -74,6 +84,12 @@ class TestAgentConstruction(AgentTestCase):
             self.slot.revision,
         )
         self.assertEqual(self.slot.read(), "")
+
+    def test_each_agent_has_unique_remote_id(self):
+        a1 = self.make_agent()
+        a1.close()
+        a2 = self.make_agent()
+        self.assertNotEqual(a1.remote_id, a2.remote_id)
 
     def test_close_is_idempotent_and_stops_threads(self):
         agent = self.make_agent()
@@ -86,25 +102,25 @@ class TestAgentConstruction(AgentTestCase):
 
 class TestAgentCommandHandling(AgentTestCase):
     def test_command_is_acked_immediately(self):
-        self.make_agent()
-        self.deliver_command(1)
+        agent = self.make_agent()
+        self.deliver_command(agent, 1)
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 1))
 
     def test_response_written_with_handler_payload(self):
-        self.make_agent()
-        self.deliver_command(1, "job")
+        agent = self.make_agent()
+        self.deliver_command(agent, 1, "job")
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 1)
         )
         message = unpack(value)
         assert message is not None
-        self.assertEqual(message.frm, Role.AGENT.value)
-        self.assertEqual(message.to, Role.CONTROLLER.value)
+        self.assertEqual(message.frm, agent.remote_id)
+        self.assertEqual(message.to, CONTROLLER_ADDR)
         self.assertEqual(message.payload, "result:job")
 
     def test_error_result_written_as_error(self):
-        self.make_agent(handler=lambda payload: ("boom", True))
-        self.deliver_command(1)
+        agent = self.make_agent(handler=lambda payload: ("boom", True))
+        self.deliver_command(agent, 1)
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ERROR, 1)
         )
@@ -114,8 +130,8 @@ class TestAgentCommandHandling(AgentTestCase):
         def handler(payload: str):
             raise RuntimeError("kaboom")
 
-        self.make_agent(handler=handler)
-        self.deliver_command(1)
+        agent = self.make_agent(handler=handler)
+        self.deliver_command(agent, 1)
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ERROR, 1)
         )
@@ -130,10 +146,10 @@ class TestAgentWorkerPool(AgentTestCase):
             barrier.wait()
             return (f"done:{payload}", False)
 
-        self.make_agent(handler=handler, max_workers=2)
-        self.deliver_command(1, "a")
+        agent = self.make_agent(handler=handler, max_workers=2)
+        self.deliver_command(agent, 1, "a")
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 1))
-        self.deliver_command(2, "b")
+        self.deliver_command(agent, 2, "b")
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 2))
         # Both handlers block on the barrier; only a pool of >= 2 workers can
         # pass it, so observing both responses proves concurrent processing.
@@ -147,7 +163,7 @@ class TestAgentWorkerPool(AgentTestCase):
         first_seq = unpack(first_value).seq
         second_seq = 2 if first_seq == 1 else 1
         self.slot.overwrite(
-            wire(Role.CONTROLLER, Role.AGENT, first_seq, MsgType.ACK)
+            wire(CONTROLLER_ADDR, agent.remote_id, first_seq, MsgType.ACK)
         )
         self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, second_seq),
@@ -156,7 +172,7 @@ class TestAgentWorkerPool(AgentTestCase):
 
     def test_pool_workers_exit_after_close(self):
         agent = self.make_agent(max_workers=2)
-        self.deliver_command(1)
+        self.deliver_command(agent, 1)
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.RESPONSE, 1))
         agent.close()
         self.assertTrue(wait_until(lambda: not worker_threads(), timeout=2.0))
@@ -170,14 +186,14 @@ class TestAgentResponseCache(AgentTestCase):
             calls.append(payload)
             return ("result:x", False)
 
-        self.make_agent(handler=handler)
-        self.deliver_command(1, "work")
+        agent = self.make_agent(handler=handler)
+        self.deliver_command(agent, 1, "work")
         first, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 1)
         )
         self.assertEqual(calls, ["work"])
-        self.slot.overwrite(wire(Role.CONTROLLER, Role.AGENT, 1, MsgType.ACK))
-        self.deliver_command(1, "work")
+        self.slot.overwrite(wire(CONTROLLER_ADDR, agent.remote_id, 1, MsgType.ACK))
+        self.deliver_command(agent, 1, "work")
         _, replayed = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 1), after=first
         )
@@ -189,7 +205,7 @@ class TestAgentGeneration(AgentTestCase):
     def test_command_after_close_is_not_acknowledged(self):
         agent = self.make_agent()
         agent.close()
-        self.deliver_command(9)
+        self.deliver_command(agent, 9)
         with self.assertRaises(AssertionError):
             self.slot.wait_for_write(
                 lambda value: is_message(value, MsgType.ACK, 9), timeout=0.05
@@ -197,7 +213,7 @@ class TestAgentGeneration(AgentTestCase):
 
     def test_close_while_response_pending_stops_threads(self):
         agent = self.make_agent()
-        self.deliver_command(1)
+        self.deliver_command(agent, 1)
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.RESPONSE, 1))
         agent.close()
         self.assertFalse(agent._dispatcher_thread.is_alive())
@@ -205,12 +221,110 @@ class TestAgentGeneration(AgentTestCase):
 
     def test_restarted_agent_serves_new_commands_on_same_slot(self):
         first = self.make_agent()
-        self.deliver_command(1)
+        self.deliver_command(first, 1)
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.RESPONSE, 1))
         first.close()
         second = self.make_agent()
-        self.deliver_command(1, "again")
+        self.deliver_command(second, 1, "again")
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.RESPONSE, 1))
+
+
+class TestAgentPing(AgentTestCase):
+    def test_ping_is_acked_immediately(self):
+        """A PING message is answered with an ACK immediately — no processing,
+        no response generated."""
+        agent = self.make_agent()
+        self.slot.overwrite(
+            wire(CONTROLLER_ADDR, agent.remote_id, 10, MsgType.PING)
+        )
+        _, ack = self.slot.wait_for_write(
+            lambda value: is_message(value, MsgType.ACK, 10)
+        )
+        msg = unpack(ack)
+        assert msg is not None
+        self.assertEqual(msg.frm, agent.remote_id)
+        self.assertEqual(msg.to, CONTROLLER_ADDR)
+
+    def test_ping_does_not_generate_response(self):
+        """A PING produces only an ACK — no RESPONSE or ERROR follows."""
+        agent = self.make_agent()
+        self.slot.overwrite(
+            wire(CONTROLLER_ADDR, agent.remote_id, 20, MsgType.PING)
+        )
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 20))
+        # No response should appear within a short window
+        with self.assertRaises(AssertionError):
+            self.slot.wait_for_write(
+                lambda value: is_message(value, MsgType.RESPONSE, 20), timeout=0.05
+            )
+
+
+class TestAgentMessageRouting(AgentTestCase):
+    def test_message_addressed_to_different_remote_is_ignored(self):
+        """A message with to=different_hex_id is ignored by this agent."""
+        self.make_agent()
+        other_id = "cafef00d"
+        self.slot.overwrite(
+            wire(CONTROLLER_ADDR, other_id, 1, MsgType.COMMAND, "not for me")
+        )
+        with self.assertRaises(AssertionError):
+            self.slot.wait_for_write(
+                lambda value: is_message(value, MsgType.ACK, 1), timeout=0.05
+            )
+
+    def test_message_addressed_to_controller_is_ignored(self):
+        """A message addressed to C is ignored by the agent (it's for the
+        controller, not for us)."""
+        self.make_agent()
+        self.slot.overwrite(
+            wire("cafef00d", CONTROLLER_ADDR, 1, MsgType.RESPONSE, "not for me")
+        )
+        with self.assertRaises(AssertionError):
+            self.slot.wait_for_write(
+                lambda value: is_message(value, MsgType.ACK, 1), timeout=0.05
+            )
+
+
+class TestAgentBroadcastRegister(AgentTestCase):
+    def test_broadcast_register_triggers_delayed_registration(self):
+        """A broadcast register command causes the Agent to schedule a delayed
+        registration response (a RESPONSE with sysinfo payload) to the
+        controller."""
+        import json
+
+        agent = self.make_agent()
+        self.slot.overwrite(
+            wire(CONTROLLER_ADDR, BROADCAST_ADDR, 50, MsgType.COMMAND,
+                 json.dumps({"op": "register"}))
+        )
+        # The registration response arrives after a random delay (0.1–4.0s).
+        # Wait up to 5s for a RESPONSE from the agent.
+        _, reg = self.slot.wait_for_write(
+            lambda value: is_message(value, MsgType.RESPONSE, 0), timeout=5.0
+        )
+        msg = unpack(reg)
+        assert msg is not None
+        self.assertEqual(msg.frm, agent.remote_id)
+        self.assertEqual(msg.to, CONTROLLER_ADDR)
+        # The payload should be sysinfo JSON with an "os" field.
+        payload = json.loads(msg.payload)
+        self.assertIn("os", payload)
+
+    def test_broadcast_register_does_not_send_ack(self):
+        """A broadcast register command does NOT produce an ACK — only the
+        delayed registration response."""
+        agent = self.make_agent()
+        import json
+
+        self.slot.overwrite(
+            wire(CONTROLLER_ADDR, BROADCAST_ADDR, 60, MsgType.COMMAND,
+                 json.dumps({"op": "register"}))
+        )
+        # No ACK should appear within a short window
+        with self.assertRaises(AssertionError):
+            self.slot.wait_for_write(
+                lambda value: is_message(value, MsgType.ACK, 60), timeout=0.05
+            )
 
 
 if __name__ == "__main__":
