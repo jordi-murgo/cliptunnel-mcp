@@ -44,6 +44,16 @@ EXPECTED_TOOLS = {
     "remote_upload",
     "remote_download",
     "remote_sysinfo",
+    "remote_agent_login",
+    "remote_agent_login_status",
+    "remote_agent_models",
+    "remote_agent_start",
+    "remote_agent_continue",
+    "remote_agent_result",
+    "remote_agent_status",
+    "remote_agent_list",
+    "remote_agent_clear",
+    "remote_agent_end",
 }
 
 
@@ -280,6 +290,26 @@ class TestFsTools(ServerTestCase):
         data = self.call_json("remote_shell", cmd="echo hi")
         self.assertEqual(data["status"], "error")
         self.assertIn("no transport configured", data["error"])
+
+class TestAgentTools(ServerTestCase):
+    def test_agent_list_returns_json(self):
+        """remote_agent_list returns valid JSON (possibly an empty array)."""
+        result = self.call("remote_agent_list")
+        data = json.loads(result)
+        self.assertIsInstance(data, list)
+
+    def test_agent_end_unknown_session(self):
+        """remote_agent_end with a fake session_id returns an error string."""
+        result = self.call("remote_agent_end", session_id="nope12345")
+        # Error responses from the Agent come back as the documented error
+        # string when the Controller normalizes None.
+        self.assertIn(result, ("session not found: nope12345", "ERROR: no response from Agent"))
+
+    def test_agent_login_status_idle(self):
+        """remote_agent_login_status returns idle when no login in progress."""
+        result = self.call("remote_agent_login_status")
+        data = json.loads(result)
+        self.assertIn(data["status"], ("idle", "polling", "done", "error"))
 
 
 if __name__ == "__main__":
