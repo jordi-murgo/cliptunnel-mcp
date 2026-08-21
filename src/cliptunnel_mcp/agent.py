@@ -321,11 +321,19 @@ class Agent:
     # ── Slot access ──────────────────────────────────────────────────
 
     def _write_slot_safe(self, wire: str) -> None:
-        """Write to the slot and update _last_raw atomically."""
-        with self._slot_lock:
-            self._transport.write(wire)
-            self._last_raw = wire
+        """Write to the slot and update _last_raw atomically.
 
+        Catches clipboard write failures so a transient clipboard lock
+        (Citrix, EDR) does not crash the responder thread.  The caller's
+        retransmission loop will retry on the next tick.
+        """
+        try:
+            with self._slot_lock:
+                self._transport.write(wire)
+                self._last_raw = wire
+        except Exception:
+            logger.warning("clipboard write failed — will retry", exc_info=True)
+            time.sleep(0.5)
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
