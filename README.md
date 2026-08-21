@@ -1,49 +1,76 @@
 # cliptunnel-mcp
 
-Operate a locked-down remote machine through its clipboard.
+Operate locked-down remote machines through their clipboard — now with multi-remote support and autonomous agents.
 
 ## What it does
 
-`cliptunnel-mcp` turns a shared clipboard into a reliable control channel between two machines. When the remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
+`cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-The package ships three layers:
+**v0.5.0** introduces CT2 protocol v2 with multi-remote support, autonomous Copilot agents, and clipboard-event integration.
 
-- **Protocol** — a wire format (`CT1`) with base64 payloads, sequence numbers, and typed messages (command, response, error, ack).
-- **Endpoints** — `Controller` (operator side) and `Agent` (remote side), connected by an injected `Transport`. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
-- **MCP server** — a FastMCP application that exposes the Controller's helpers as `remote_shell`, `remote_fs_*`, `remote_upload`, `remote_download`, and `remote_sysinfo` tools over stdio.
+The package ships four layers:
 
-The core package has zero dependencies. The MCP server requires the optional `[server]` extra (`mcp>=1.2,<2`).
+- **Protocol** — CT2 wire format with 8-char hex remote IDs, broadcast routing, keepalive pings, and typed messages (command, response, error, ack, ping).
+- **Endpoints** — `Controller` (operator side) with a remote registry, and multiple `Agent` instances (remote side), each with a unique hex ID. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
+- **MCP server** — a FastMCP application with 25 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, and connection discovery.
+- **Clipboard transport** — backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform event-driven change detection.
 
 ## Architecture
 
-![Mermaid diagram](https://mermaid.ink/img/Z3JhcGggVEQKICBzdWJncmFwaCBPcGVyYXRvclsiT3BlcmF0b3IgbWFjaGluZSJdCiAgICBDbGllbnRbIk1DUCBjbGllbnQ8YnIvPihDbGF1ZGUsIFBpLCBDdXJzb3IsIOKApikiXQogICAgU2VydmVyWyJNQ1Agc2VydmVyPGJyLz4oY2xpcHR1bm5lbC1tY3ApIl0KICAgIENvbnRyb2xsZXJbIkNvbnRyb2xsZXI8YnIvPnNlbmRfY29tbWFuZCDihpIgRnV0dXJlIl0KICAgIENUMVsiQ2xpcGJvYXJkVHJhbnNwb3J0PGJyLz4oT1MgY2xpcGJvYXJkKSJdCiAgZW5kCgogIHN1YmdyYXBoIFJlbW90ZVsiTG9ja2VkLWRvd24gbWFjaGluZSJdCiAgICBDVDJbIkNsaXBib2FyZFRyYW5zcG9ydDxici8-KE9TIGNsaXBib2FyZCkiXQogICAgQWdlbnRbIkFnZW50PGJyLz5BQ0sg4oaSIHByb2Nlc3Mg4oaSIFIvRSJdCiAgICBEaXNwYXRjaFsiZGlzcGF0Y2g8YnIvPnNoZWxsIMK3IGZzIMK3IGJpbiJdCiAgZW5kCgogIENsaWVudCAtLSAiTUNQIC8gc3RkaW8iIC0tPiBTZXJ2ZXIKICBTZXJ2ZXIgLS0-IENvbnRyb2xsZXIKICBDb250cm9sbGVyIC0tICJDVDEgd2lyZSIgLS0-IENUMQogIENUMSAtLSAiY2xpcGJvYXJkIHNsb3Q8YnIvPihsYXN0LXdyaXRlci13aW5zKSIgLS0-IENUMgogIENUMiAtLT4gQWdlbnQKICBBZ2VudCAtLT4gRGlzcGF0Y2gKICBEaXNwYXRjaCAtLSAicmVzcG9uc2UiIC0tPiBBZ2VudAogIEFnZW50IC0tICJDVDEgd2lyZSIgLS0-IENUMgogIENUMiAtLSAiY2xpcGJvYXJkIHNsb3QiIC0tPiBDVDEKICBDVDEgLS0-IENvbnRyb2xsZXIK)
+```
+Operator machine                              Remote machine(s)
+┌──────────────────┐     clipboard     ┌──────────────────────┐
+│  MCP Client      │    (Citrix/VDI)   │  Agent (remote_id)   │
+│  (Claude, Pi)    │                   │                      │
+│  ┌────────────┐  │                   │  ┌────────────────┐  │
+│  │ MCP Server │  │   CT2|hex|C|...   │  │ operations     │  │
+│  │ (FastMCP)  │──┼───────────────────┼──│ dispatch        │  │
+│  └────────────┘  │                   │  │                │  │
+│  Controller      │                   │  │ copilot_client │  │
+│  - registry      │   CT2|C|hex|...   │  │ agent_session  │  │
+│  - keepalive     │──┼───────────────────┼──│                │  │
+│  - broadcast     │                   │  └────────────────┘  │
+└──────────────────┘                   └──────────────────────┘
+```
 
-
-Both endpoints share a single last-writer-wins clipboard slot. The protocol uses stop-and-wait ARQ: the Controller writes one command, the Agent ACKs immediately, processes the command in a worker pool, then writes one typed response (R or E) and retransmits it until the Controller's matching ACK arrives. The Controller sends one command at a time and resolves futures as responses come back.
+The Controller broadcasts a register command on startup. Each Agent generates a random 8-hex ID, waits a random delay (0.1–4.0s), and sends back its sysinfo. The Controller maintains a registry of all connected remotes. A keepalive thread pings idle remotes every 60s and marks them dead after 120s of silence.
 
 ### Wire format
 
 ```
-CT1|<from>|<to>|<seq>|<type>|<payload>
+CT2|<from>|<to>|<seq>|<type>|<payload>
 ```
 
-| Field    | Value                                                    |
-|----------|----------------------------------------------------------|
-| `CT1`    | Protocol signature + version                             |
-| `from`   | `C` (Controller) or `A` (Agent)                          |
-| `to`     | `C` or `A`                                               |
-| `seq`    | Positive integer, monotonic per Controller session       |
-| `type`   | `C` (command), `R` (response), `E` (error), `A` (ack)    |
-| `payload`| Base64-encoded UTF-8                                     |
+| Field    | Value                                                                |
+|----------|----------------------------------------------------------------------|
+| `CT2`    | Protocol signature + version                                         |
+| `from`   | `C` (Controller) or 8-char hex (remote ID, e.g. `a1b2c3d4`)         |
+| `to`     | `C` (Controller), `*` (broadcast), or 8-char hex (specific remote)  |
+| `seq`    | Positive integer, monotonic per session                             |
+| `type`   | `C` (command), `R` (response), `E` (error), `A` (ack), `P` (ping)   |
+| `payload`| Base64-encoded UTF-8                                                 |
+
+### Registration flow
+
+1. **Controller startup** → broadcasts `CT2|C|*|seq|C|{"op":"register"}`
+2. **Agent startup** → generates 8-hex ID → random delay 0.1–4.0s → `CT2|<hex>|C|0|R|<sysinfo>`
+3. **Agent receives broadcast** → random delay 0.1–4.0s → same registration response
+4. No ACK for broadcast responses
+
+### Keepalive
+
+- Controller pings remotes idle > 60s: `CT2|C|<hex>|seq|P|`
+- Agent responds with ACK → Controller updates `last_seen`
+- Remote marked `dead` if > 120s since last message/ACK
 
 ## Installation
 
 ```bash
 pip install cliptunnel-mcp          # core + cliptunnel-agent binary
-pip install cliptunnel-mcp[server]  # adds cliptunnel-mcp server binary (mcp>=1.2,<2)
+pip install cliptunnel-mcp[server]  # adds MCP server binary (mcp>=1.2,<2)
 ```
 
-Both modes install console entry points:
+Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications).
 
 | Binary              | Extra needed | Purpose                                      |
 |---------------------|--------------|----------------------------------------------|
@@ -54,24 +81,22 @@ Both modes install console entry points:
 
 ### Agent (remote machine)
 
-The simplest way to run the Agent is the installed binary:
-
 ```bash
 cliptunnel-agent
 ```
 
-> **Antivirus / EDR workaround (Windows)**: unsigned `.exe` entry points may be quarantined. Use `python -m` instead — it runs through the already-trusted Python interpreter with no generated binary:
+> **Antivirus / EDR workaround (Windows)**: unsigned `.exe` entry points may be quarantined. Use `python -m` instead:
 >
 > ```bash
 > python -m cliptunnel_mcp.agent    # instead of cliptunnel-agent
 > python -m cliptunnel_mcp.server   # instead of cliptunnel-mcp
 > ```
 
-This builds a `ClipboardTransport` backed by the system clipboard (`pbcopy`/`pbpaste` on macOS, `user32` on Windows, `wl-copy`/`wl-paste` on Wayland, `xclip`/`xsel` on X11) and wires `operations.dispatch` as the command handler. The Agent watches the clipboard slot, ACKs commands, processes them in a worker pool, and writes responses back. Press `Ctrl+C` to stop.
+The Agent generates a random 8-hex ID, registers with the Controller by sending its sysinfo, then watches the clipboard for commands. It uses `clipboard-event` for change detection (event-driven on Windows and Wayland, polling on macOS and X11).
 
 ### Controller + MCP server (operator machine)
 
-On the operator side, configure your MCP client (Claude Desktop, Cursor, Pi, etc.) to launch the server binary:
+Configure your MCP client (Claude Desktop, Cursor, Pi, etc.):
 
 ```json
 {
@@ -84,26 +109,9 @@ On the operator side, configure your MCP client (Claude Desktop, Cursor, Pi, etc
 }
 ```
 
-If the `cliptunnel-mcp` binary is blocked by antivirus, use `python -m`:
-
-```json
-{
-  "mcpServers": {
-    "cliptunnel": {
-      "command": "python",
-      "args": ["-m", "cliptunnel_mcp.server"]
-    }
-  }
-}
-```
-
-The server binary injects a `Controller` backed by a `ClipboardTransport` and runs the FastMCP application over stdio. All `remote_*` tools are available immediately.
-
-> **Note**: the MCP server requires `pip install cliptunnel-mcp[server]`.
+The server broadcasts a register command on startup, discovers connected remotes, and maintains a live registry with keepalive pings.
 
 ### Controller only (no MCP)
-
-For programmatic use without an MCP client:
 
 ```python
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
@@ -112,17 +120,16 @@ import json
 
 controller = Controller(transport=ClipboardTransport())
 
-# Async — returns a Future
-future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}))
+# Send to a specific remote
+future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}), remote_id="a1b2c3d4")
 result = future.result(timeout=30)
 
-# Sync — blocks until response or timeout
-output = controller.send_command_sync(json.dumps({"op": "fs.read", "path": "/etc/hostname"}))
+# List connected remotes
+connections = controller.get_connections()
+# {"a1b2c3d4": {"os": "Windows", "status": "alive", "last_seen": 1692634123.4, "last_seen_ago": 0.3, ...}}
 ```
 
 ### Programmatic Agent
-
-If you need a custom handler or transport:
 
 ```python
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
@@ -130,69 +137,62 @@ from cliptunnel_mcp import Agent
 from cliptunnel_mcp.operations import dispatch
 
 agent = Agent(transport=ClipboardTransport(), handler=dispatch)
-# Blocks until agent.close() — run in a thread or manage lifecycle yourself.
+# Agent generates its own remote_id and registers automatically
 ```
 
-## API surface
+## MCP tools
 
-### `Controller`
+The server exposes **25 tools** over stdio. All tools accept an optional `remote_id` parameter to target a specific remote. If omitted, the Controller picks the first alive remote.
 
-The operator-side endpoint. Sends commands asynchronously, dispatches one at a time, and resolves futures as responses arrive.
+### Shell & filesystem
 
-| Method | Description |
-|--------|-------------|
-| `send_command(command: str) -> Future` | Queue a command; returns a `Future` that resolves with the response payload or `None` on failure. |
-| `send_command_sync(command: str) -> str \| None` | Send and block until response or `timeout` seconds. |
-| `close()` | Stop background threads. Idempotent. |
+| Tool | Description |
+|------|-------------|
+| `remote_shell` | Execute a shell command; auto-sync (10s) then async with `job_id` polling. |
+| `remote_shell_result` | Poll for the result of an async shell command. |
+| `remote_fs_read` | Read a file. |
+| `remote_fs_write` | Create or overwrite a file (creates parent dirs). |
+| `remote_fs_list` | List directory entries. |
+| `remote_fs_delete` | Delete a file. |
+| `remote_fs_replace` | Search-and-replace in a file (exact-once match). |
+| `remote_fs_search` | Regex search in a file. |
+| `remote_fs_find` | Glob-find files under a directory. |
+| `remote_fs_bin_read` | Read a binary file as base64. |
+| `remote_fs_bin_write` | Write base64 content to a binary file. |
 
-Constructor parameters: `transport` (required), `timeout`, `retries`, `poll_interval`, `ack_timeout`, `initial_seq`, `persist_seq`, `seq_store`.
+### Binary transfer
 
-### `Agent`
+| Tool | Description |
+|------|-------------|
+| `remote_upload` | Upload a local file to a remote machine. |
+| `remote_download` | Download a remote file to the local machine. |
 
-The remote-side endpoint. Watches the slot, ACKs commands immediately, processes them in a worker pool, and writes one typed response at a time with retransmission.
+### System info
 
-| Method | Description |
-|--------|-------------|
-| `close()` | Stop this agent generation. Idempotent; never strands a thread. |
+| Tool | Description |
+|------|-------------|
+| `remote_sysinfo` | Return system info: OS, Python, CPU, memory, disk, user, shell, agent auth, clipboard backend. |
 
-Constructor parameters: `transport` (required), `handler` (required), `poll_interval`, `max_workers`, `response_ack_timeout`.
+### Remote agent (Copilot)
 
-### `dispatch`
+| Tool | Description |
+|------|-------------|
+| `remote_agent_login` | Start GitHub OAuth device flow for Copilot authentication. |
+| `remote_agent_login_status` | Poll login state (idle/polling/done/error). |
+| `remote_agent_models` | List available Copilot models on the remote. |
+| `remote_agent_start` | Create an autonomous agent session (async). |
+| `remote_agent_continue` | Send a message to an existing session. |
+| `remote_agent_result` | Poll for the async result. |
+| `remote_agent_status` | Query session status. |
+| `remote_agent_list` | List active agent sessions. |
+| `remote_agent_clear` | Clear session message history. |
+| `remote_agent_end` | Destroy a session. |
 
-The default Agent handler. Parses JSON payloads and routes to the matching operation.
+### Connections
 
-```python
-from cliptunnel_mcp.operations import dispatch
-
-output, is_error = dispatch('{"op": "shell", "cmd": "echo hello"}')
-```
-
-### Protocol primitives
-
-| Symbol | Description |
-|--------|-------------|
-| `pack(msg) -> str` | Serialize a `Message` into wire format. |
-| `unpack(raw) -> Message \| None` | Parse a wire string; `None` on malformed input. |
-| `validate(raw, my_role) -> bool` | True if `raw` is well-formed and addressed to `my_role`. |
-| `Message` | Dataclass: `frm`, `to`, `seq`, `mtype`, `payload`. |
-| `MsgType` | Enum: `COMMAND`, `RESPONSE`, `ERROR`, `ACK`. |
-| `Role` | Enum: `CONTROLLER`, `AGENT`. |
-| `SeqTracker` | Per-seq dedupe state: new → processing → done. |
-
-### Transport protocol
-
-```python
-class Transport(Protocol):
-    def read(self) -> str: ...
-    def write(self, value: str) -> None: ...
-
-class RevisionMonitor(Protocol):
-    @property
-    def revision(self) -> int: ...
-    def wait_for_change(self, after: int, timeout: float = 1.0) -> int: ...
-```
-
-A transport must implement `read`/`write` (last-writer-wins). Implementing `RevisionMonitor` (or exposing `wait_for_revision` / `wait_for_change`) enables change-aware waits instead of polling.
+| Tool | Description |
+|------|-------------|
+| `remote_connections` | List all connected remotes with sysinfo, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
 
 ## Operations
 
@@ -205,58 +205,92 @@ The `dispatch` handler supports these operations:
 | `fs.write` | `path`, `content` | `wrote N bytes to PATH` |
 | `fs.list` | `path` | JSON: `[{name, size, is_dir}]` |
 | `fs.delete` | `path` | `deleted PATH` |
-| `fs.replace` | `path`, `old`, `new` | `replaced 1 occurrence in PATH` (exact-once match) |
+| `fs.replace` | `path`, `old`, `new` | `replaced 1 occurrence` (exact-once) |
 | `fs.search` | `path`, `pattern` | JSON: `[{line, content}]` (regex) |
-| `fs.find` | `path`, `pattern` | JSON: `[PATH, ...]` (glob, `**` recurses) |
+| `fs.find` | `path`, `pattern` | JSON: `[PATH, ...]` (glob) |
 | `fs.bin_read` | `path` | JSON: `{path, size, b64}` |
 | `fs.bin_write` | `path`, `b64` | `wrote N bytes to PATH` |
+| `sysinfo` | — | JSON: full system info |
+| `register` | — | JSON: sysinfo (alias for agent registration) |
+| `agent` | `action`, ... | JSON: session management (start, continue, result, status, clear, end, list, login, login_status) |
 
-## MCP tools
+## Remote agent
 
-The server exposes 13 tools over stdio:
+The Agent can run autonomous Copilot-powered agents on the remote machine. Each agent session:
 
-| Tool | Description |
-|------|-------------|
-| `remote_shell` | Execute a shell command; auto-sync (10 s) then async with `job_id` polling. |
-| `remote_shell_result` | Poll for the result of an async shell command. |
-| `remote_fs_read` | Read a file. |
-| `remote_fs_write` | Create or overwrite a file (creates parent dirs). |
-| `remote_fs_list` | List directory entries. |
-| `remote_fs_delete` | Delete a file. |
-| `remote_fs_replace` | Search-and-replace in a file (exact-once match). |
-| `remote_fs_search` | Regex search in a file. |
-| `remote_fs_find` | Glob-find files under a directory. |
-| `remote_fs_bin_read` | Read a binary file as base64. |
-| `remote_fs_bin_write` | Write base64 content to a binary file. |
-| `remote_upload` | Upload a local file to the remote machine. |
-| `remote_download` | Download a remote file to the local machine. |
-| `remote_sysinfo` | Return system info (OS, Python, CPU, memory, disk) from the remote machine. |
+- Uses the GitHub Copilot API with function calling (shell, fs_read, fs_write, fs_replace, fs_search, fs_list, fs_find)
+- Runs asynchronously in a background thread
+- Supports multi-turn conversations with `remote_agent_continue`
+- Default model: `mai-code-1.1-flash`
 
-## Lifecycle and coalescing semantics
+### Authentication
 
-- **One command at a time**: the Controller dispatches commands serially. The pending command's seq is published atomically with the slot write so the reader never observes the command before the dispatcher.
-- **Immediate ACK**: the Agent ACKs every command before processing, freeing the slot for the Controller.
-- **One response at a time**: the Agent holds exactly one pending response envelope. A new command never implicitly ACKs a pending response — only the Controller's matching `A(seq)` releases it.
-- **Retransmission**: both sides retransmit on ACK timeout. The Controller retries up to `retries` times (default 3). The Agent retransmits the response every `response_ack_timeout` seconds (default 1.0).
-- **Deduplication**: the Agent's `SeqTracker` tracks per-seq state (new → processing → done). Duplicate commands are ACKed; done ones replay the cached typed response; in-flight ones are already being processed.
-- **Stale message guard**: the Controller skips any R/E with `seq <= min_seq` — stale slot content from a previous session.
-- **Generation-safe**: all stop state and queues are local to each instance. Closing and starting a new Agent or Controller never strands threads.
-- **Paced writes**: the Controller enforces a bounded inter-write gap (2× poll interval) so the Agent can read each message before it is overwritten.
+```python
+# Via MCP tools:
+remote_agent_login()          # Returns user_code + verification_uri
+# Open https://github.com/login/device, enter the code
+remote_agent_login_status()   # Returns {status: "done", token_saved: true}
+```
 
-## Backend selection
+Token stored in `.copilot_agent_token` on the remote machine.
 
-ClipTunnel ships `ClipboardTransport`, a transport backed by the OS clipboard. On Wayland it uses `wl-paste --watch` for *event-driven* change detection (zero polling, zero CPU when idle). On macOS, Windows, and X11 it polls every 100 ms with hash-based change detection. It implements both `Transport` and `RevisionMonitor`, so both endpoints get change-aware waits. The binaries `cliptunnel-agent` and `cliptunnel-mcp` use it automatically.
+## API surface
 
-For custom setups — a Citrix clipboard redirection, a shared Gist, a network pipe — implement the `Transport` protocol (`read() -> str`, `write(str) -> None`) and optionally `RevisionMonitor` (`revision` + `wait_for_change`). Inject it into `Controller` or `Agent` directly.
+### `Controller`
+
+The operator-side endpoint with remote registry and keepalive.
+
+| Method | Description |
+|--------|-------------|
+| `send_command(command, remote_id=None) -> Future` | Queue a command to a specific remote (or first alive). |
+| `send_command_sync(command, remote_id=None) -> str \| None` | Send and block until response or timeout. |
+| `get_connections() -> dict` | Return the remote registry with sysinfo, last_seen, last_seen_ago, and status. |
+| `close()` | Stop background threads. Idempotent. |
+
+### `Agent`
+
+The remote-side endpoint with auto-registration and ping handling.
+
+| Method | Description |
+|--------|-------------|
+| `close()` | Stop this agent. Idempotent. |
+| `send_registration()` | Send sysinfo to the Controller. |
+
+Constructor parameters: `transport` (required), `handler` (required), `poll_interval`, `max_workers`, `response_ack_timeout`.
+
+### Protocol primitives
+
+| Symbol | Description |
+|--------|-------------|
+| `pack(msg) -> str` | Serialize a `Message` into wire format. |
+| `unpack(raw) -> Message \| None` | Parse a wire string; `None` on malformed. |
+| `validate(raw, my_id) -> bool` | True if addressed to `my_id` (`C` or hex) or broadcast. |
+| `generate_remote_id() -> str` | Generate a random 8-char hex ID. |
+| `Message` | Dataclass: `frm`, `to`, `seq`, `mtype`, `payload`. |
+| `MsgType` | Enum: `COMMAND`, `RESPONSE`, `ERROR`, `ACK`, `PING`. |
+| `SeqTracker` | Per-seq dedupe state: new → processing → done. |
+
+## Clipboard backend
+
+ClipTunnel uses [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform clipboard access and change detection:
+
+| Platform | Backend | Change detection | Latency |
+|----------|---------|------------------|---------|
+| macOS | NSPasteboard `changeCount` | Polling (50ms) | ~50ms |
+| Windows | `WM_CLIPBOARD_UPDATE` | Event-driven | Sub-ms |
+| Linux / Wayland | `wl-paste --watch` | Event-driven | Sub-ms |
+| Linux / X11 | `xclip`/`xsel` | Polling (100ms) | ~100ms |
+
+The `ClipboardTransport` adapts clipboard-event to the `Transport` and `RevisionMonitor` protocols. For custom setups, implement the `Transport` protocol directly.
 
 ## Platform support
 
-| Platform          | Status      | Clipboard backend                                  | Change detection |
-|-------------------|-------------|----------------------------------------------------|------------------|
-| macOS             | Tested      | `pbcopy`/`pbpaste` (built-in)                      | Polling (100 ms) |
-| Windows           | Tested      | `ctypes` + `user32` (no extra deps)                | Polling (100 ms) |
-| Linux / Wayland   | Tested      | `wl-copy`/`wl-paste` (`wl-clipboard` package)      | Event-driven     |
-| Linux / X11       | Core works  | `xclip` (fallback: `xsel`)                         | Polling (100 ms) |
+| Platform | Status | Clipboard | CI |
+|----------|--------|-----------|-----|
+| macOS | Tested | clipboard-event (changeCount) | macOS + Linux + Windows × Python 3.10–3.14 |
+| Windows | Tested | clipboard-event (WM_CLIPBOARD_UPDATE) | Same |
+| Linux / Wayland | Tested | clipboard-event (wl-paste --watch) | Same |
+| Linux / X11 | Core works | clipboard-event (xclip polling) | Same |
 
 ## Development
 
@@ -267,7 +301,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (161 tests)
+# Run the test suite (232 tests)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -276,13 +310,26 @@ python -m unittest discover -s tests -t .
 PYTHONPATH=src:. python -m pytest -q
 ```
 
-The test suite uses a deterministic `ClipboardSlot` test double that models the last-writer-wins channel with revisions and bounded waits. No clipboard hardware is needed.
+The test suite uses a deterministic `ClipboardSlot` test double. No clipboard hardware needed.
+
+## Lifecycle and coalescing semantics
+
+- **One command at a time**: the Controller dispatches commands serially per target remote.
+- **Immediate ACK**: the Agent ACKs every command before processing.
+- **One response at a time**: the Agent holds one pending response; retransmits until the Controller's ACK.
+- **Keepalive**: Controller pings idle remotes (>60s), marks dead (>120s).
+- **Broadcast routing**: `to=*` messages are processed by all remotes with random backoff; no ACK.
+- **Targeted routing**: `to=<hex>` messages are processed only by that remote; others ignore.
+- **Stale message guard**: the Controller skips R/E with `seq <= min_seq`.
+- **Generation-safe**: closing and restarting never strands threads.
+- **Paced writes**: bounded inter-write gap prevents message loss.
 
 ## Limitations
 
-- **Text-only clipboard**: the protocol carries UTF-8 strings. Binary files are base64-encoded, which roughly doubles their size over the wire.
-- **Single slot**: the clipboard holds one value at a time. The ARQ protocol serializes all traffic through it, so throughput is bounded by the clipboard round-trip latency.
-- **No encryption**: the wire format is plain base64. If the clipboard is observable, use an encryption layer in your transport or handler.
+- **Text-only clipboard**: the protocol carries UTF-8 strings. Binary files are base64-encoded.
+- **Shared slot**: multiple remotes share one clipboard; the protocol serializes all traffic.
+- **No encryption**: the wire format is plain base64.
+- **One Controller**: the protocol supports one Controller and multiple Agents, not multiple Controllers.
 
 ## License
 
