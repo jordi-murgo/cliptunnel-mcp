@@ -45,7 +45,7 @@ graph LR
     Controller -- "CT2 wire<br/>(clipboard)" --> Agent2
 ```
 
-The Controller broadcasts a register command on startup. Each Agent generates a random 8-hex ID, waits a random delay (0.1–4.0s), and sends back its sysinfo. The Controller maintains a registry of all connected remotes. A keepalive thread pings idle remotes every 60s and marks them dead after 120s of silence.
+The Controller broadcasts a register command on startup. Each Agent generates a random 8-hex ID, waits a random delay (0.1–4.0s), and sends back its sysinfo. The Controller maintains a registry of all connected remotes. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds.
 
 ### Wire format
 
@@ -89,12 +89,12 @@ sequenceDiagram
     participant C as Controller
     participant A as Agent
 
-    Note over C: idle > 60s detected
+    Note over C: idle > 5 min detected
     C->>A: CT2|C|<hex>|seq|P| (ping)
     A-->>C: CT2|<hex>|C|seq|A| (ACK)
     Note over C: last_seen updated
 
-    Note over C,A: idle > 120s with no response
+    Note over C,A: no response 30s after ping
     Note over C: status → dead
 ```
 
@@ -352,7 +352,7 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 - **One command at a time**: the Controller dispatches commands serially per target remote.
 - **Immediate ACK**: the Agent ACKs every command before processing.
 - **One response at a time**: the Agent holds one pending response; retransmits until the Controller's ACK.
-- **Keepalive**: Controller pings idle remotes (>60s), marks dead (>120s).
+- **Keepalive**: Controller pings remotes after 5 min idle, marks dead if no response within 30s.
 - **Broadcast routing**: `to=*` messages are processed by all remotes with random backoff; no ACK.
 - **Targeted routing**: `to=<hex>` messages are processed only by that remote; others ignore.
 - **Stale message guard**: the Controller skips R/E with `seq <= min_seq`.
