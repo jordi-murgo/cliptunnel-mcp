@@ -327,6 +327,17 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
     # ── Shell version ───────────────────────────────────────────────
     info["shell_version"] = _detect_shell_version()
 
+    # ── Clipboard backend ──────────────────────────────────────────
+    try:
+        from clipboard_event import Clipboard
+        _clip = Clipboard()
+        info["clipboard_backend"] = _clip.backend_name
+        _clip.close()
+    except ImportError:
+        info["clipboard_backend"] = "not_installed"
+    except Exception:
+        info["clipboard_backend"] = "unknown"
+
     # ── CPU ─────────────────────────────────────────────────────────
     info["cpu_count"] = os.cpu_count() or 0
 
