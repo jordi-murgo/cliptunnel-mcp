@@ -17,20 +17,32 @@ The package ships four layers:
 
 ## Architecture
 
-```
-Operator machine                              Remote machine(s)
-┌──────────────────┐     clipboard     ┌──────────────────────┐
-│  MCP Client      │    (Citrix/VDI)   │  Agent (remote_id)   │
-│  (Claude, Pi)    │                   │                      │
-│  ┌────────────┐  │                   │  ┌────────────────┐  │
-│  │ MCP Server │  │   CT2|hex|C|...   │  │ operations     │  │
-│  │ (FastMCP)  │──┼───────────────────┼──│ dispatch        │  │
-│  └────────────┘  │                   │  │                │  │
-│  Controller      │                   │  │ copilot_client │  │
-│  - registry      │   CT2|C|hex|...   │  │ agent_session  │  │
-│  - keepalive     │──┼───────────────────┼──│                │  │
-│  - broadcast     │                   │  └────────────────┘  │
-└──────────────────┘                   └──────────────────────┘
+```mermaid
+graph LR
+    subgraph Operator["Operator machine"]
+        Client["MCP Client<br/>(Claude, Pi, Cursor)"]
+        Server["MCP Server<br/>(FastMCP)"]
+        Controller["Controller<br/>· registry<br/>· keepalive<br/>· broadcast"]
+        Client -- "MCP / stdio" --> Server
+        Server --> Controller
+    end
+
+    subgraph Remote1["Remote machine A"]
+        Agent1["Agent<br/>remote_id: a1b2c3d4"]
+        Ops1["operations<br/>dispatch"]
+        Copilot1["copilot_client<br/>agent_session"]
+        Agent1 --> Ops1
+        Ops1 --> Copilot1
+    end
+
+    subgraph Remote2["Remote machine B"]
+        Agent2["Agent<br/>remote_id: e5f6a7b8"]
+        Ops2["operations<br/>dispatch"]
+        Agent2 --> Ops2
+    end
+
+    Controller -- "CT2 wire<br/>(clipboard)" --> Agent1
+    Controller -- "CT2 wire<br/>(clipboard)" --> Agent2
 ```
 
 The Controller broadcasts a register command on startup. Each Agent generates a random 8-hex ID, waits a random delay (0.1–4.0s), and sends back its sysinfo. The Controller maintains a registry of all connected remotes. A keepalive thread pings idle remotes every 60s and marks them dead after 120s of silence.
@@ -52,16 +64,39 @@ CT2|<from>|<to>|<seq>|<type>|<payload>
 
 ### Registration flow
 
-1. **Controller startup** → broadcasts `CT2|C|*|seq|C|{"op":"register"}`
-2. **Agent startup** → generates 8-hex ID → random delay 0.1–4.0s → `CT2|<hex>|C|0|R|<sysinfo>`
-3. **Agent receives broadcast** → random delay 0.1–4.0s → same registration response
-4. No ACK for broadcast responses
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant A1 as Agent A
+    participant A2 as Agent B
+
+    C->>A1: CT2|C|*|seq|C|{"op":"register"} (broadcast)
+    C->>A2: CT2|C|*|seq|C|{"op":"register"} (broadcast)
+
+    Note over A1: random delay 0.1–4.0s
+    Note over A2: random delay 0.1–4.0s
+
+    A1-->>C: CT2|a1b2c3d4|C|0|R|<sysinfo> (no ACK)
+    A2-->>C: CT2|e5f6a7b8|C|0|R|<sysinfo> (no ACK)
+
+    Note over C: registry updated:<br/>a1b2c3d4 → {sysinfo, alive}<br/>e5f6a7b8 → {sysinfo, alive}
+```
 
 ### Keepalive
 
-- Controller pings remotes idle > 60s: `CT2|C|<hex>|seq|P|`
-- Agent responds with ACK → Controller updates `last_seen`
-- Remote marked `dead` if > 120s since last message/ACK
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant A as Agent
+
+    Note over C: idle > 60s detected
+    C->>A: CT2|C|<hex>|seq|P| (ping)
+    A-->>C: CT2|<hex>|C|seq|A| (ACK)
+    Note over C: last_seen updated
+
+    Note over C,A: idle > 120s with no response
+    Note over C: status → dead
+```
 
 ## Installation
 
