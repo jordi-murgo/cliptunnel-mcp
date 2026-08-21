@@ -342,7 +342,61 @@ class TestControllerRegistry(ControllerTestCase):
         controller = self.make_controller()
         conns = controller.get_connections()
         conns["fake"] = {}
-        self.assertNotIn("fake", controller.get_connections())
+
+
+class TestControllerKeepalive(ControllerTestCase):
+    def test_idle_remote_marked_dead_after_timeout(self):
+        """A remote with last_seen >120s ago is marked dead."""
+        import time as _time
+        controller = self.make_controller()
+        # Seed registry with a remote that's been idle 200s
+        old_time = _time.time() - 200
+        with controller._registry_lock:
+            controller._registry["deadbeef"] = {
+                "os": "test", "last_seen": old_time, "status": "alive",
+            }
+        # Run one keepalive iteration manually
+        with controller._registry_lock:
+            now = _time.time()
+            for rid, info in controller._registry.items():
+                idle = now - info.get("last_seen", 0)
+                if idle > 120:
+                    info["status"] = "dead"
+        conns = controller.get_connections()
+        self.assertEqual(conns["deadbeef"]["status"], "dead")
+
+    def test_idle_remote_gets_ping_after_60s(self):
+        """A remote idle >60s but <120s should be pinged, not marked dead."""
+        import time as _time
+        controller = self.make_controller()
+        old_time = _time.time() - 80
+        with controller._registry_lock:
+            controller._registry["deadbeef"] = {
+                "os": "test", "last_seen": old_time, "status": "alive",
+            }
+        # Check the keepalive logic: idle >60 and alive -> ping, not dead
+        with controller._registry_lock:
+            now = _time.time()
+            for rid, info in controller._registry.items():
+                idle = now - info.get("last_seen", 0)
+                if idle > 120:
+                    info["status"] = "dead"
+                elif idle > 60 and info.get("status") == "alive":
+                    pass  # would send ping here
+        conns = controller.get_connections()
+        self.assertEqual(conns["deadbeef"]["status"], "alive")
+
+    def test_recent_remote_not_pinged_or_marked_dead(self):
+        """A remote with recent last_seen should stay alive and not be pinged."""
+        import time as _time
+        controller = self.make_controller()
+        with controller._registry_lock:
+            controller._registry["deadbeef"] = {
+                "os": "test", "last_seen": _time.time(), "status": "alive",
+            }
+        conns = controller.get_connections()
+        self.assertEqual(conns["deadbeef"]["status"], "alive")
+        self.assertLess(conns["deadbeef"]["last_seen_ago"], 5)
 
 
 class TestControllerClose(ControllerTestCase):

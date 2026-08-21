@@ -9,6 +9,8 @@ from cliptunnel_mcp.protocol import (
     MsgType,
     SeqTracker,
     generate_remote_id,
+    is_valid_from_address,
+    is_valid_to_address,
     pack,
     unpack,
     validate,
@@ -28,7 +30,8 @@ __all__ = [
     "SeqTracker",
     "dispatch",
     "generate_remote_id",
-    "pack",
+    "is_valid_from_address",
+    "is_valid_to_address",
     "unpack",
     "validate",
 ]

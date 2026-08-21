@@ -16,6 +16,8 @@ from cliptunnel_mcp.protocol import (
     is_broadcast,
     is_controller,
     is_valid_address,
+    is_valid_from_address,
+    is_valid_to_address,
     pack,
     unpack,
     validate,
@@ -130,6 +132,47 @@ class TestIsValidAddress(unittest.TestCase):
     def test_non_hex_invalid(self):
         self.assertFalse(is_valid_address("xyzw1234"))
 
+
+class TestIsValidFromAddress(unittest.TestCase):
+    def test_controller_valid(self):
+        self.assertTrue(is_valid_from_address(CONTROLLER_ADDR))
+
+    def test_hex_valid(self):
+        self.assertTrue(is_valid_from_address("deadbeef"))
+
+    def test_broadcast_invalid(self):
+        self.assertFalse(is_valid_from_address(BROADCAST_ADDR))
+
+    def test_short_hex_invalid(self):
+        self.assertFalse(is_valid_from_address("dead"))
+
+
+class TestIsValidToAddress(unittest.TestCase):
+    def test_controller_valid(self):
+        self.assertTrue(is_valid_to_address(CONTROLLER_ADDR))
+
+    def test_broadcast_valid(self):
+        self.assertTrue(is_valid_to_address(BROADCAST_ADDR))
+
+    def test_hex_valid(self):
+        self.assertTrue(is_valid_to_address("deadbeef"))
+
+    def test_short_hex_invalid(self):
+        self.assertFalse(is_valid_to_address("dead"))
+
+
+class TestUnpackRejectsBroadcastAsFrom(unittest.TestCase):
+    def test_broadcast_as_from_is_rejected(self):
+        wire = pack(Message(
+            frm=BROADCAST_ADDR, to=CONTROLLER_ADDR,
+            seq=1, mtype=MsgType.COMMAND.value, payload="test",
+        ))
+        # pack() will produce the wire string, but unpack() must reject it
+        # because '*' is not a valid from-address.
+        self.assertIsNone(unpack(wire))
+
+
+class TestIsValidAddressEmpty(unittest.TestCase):
     def test_empty_invalid(self):
         self.assertFalse(is_valid_address(""))
 

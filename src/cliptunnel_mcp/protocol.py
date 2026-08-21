@@ -59,11 +59,30 @@ def generate_remote_id() -> str:
     return secrets.token_hex(4)
 
 
-def is_valid_address(addr: str) -> bool:
-    """True if *addr* is a valid CT2 address: 'C', '*', or 8-char hex."""
+def is_valid_from_address(addr: str) -> bool:
+    """True if *addr* is a valid CT2 from-address: 'C' or 8-char hex.
+
+    The broadcast address '*' is never a valid sender.
+    """
+    if addr == CONTROLLER_ADDR:
+        return True
+    return bool(_HEX_ID_RE.match(addr))
+
+
+def is_valid_to_address(addr: str) -> bool:
+    """True if *addr* is a valid CT2 to-address: 'C', '*', or 8-char hex."""
     if addr == CONTROLLER_ADDR or addr == BROADCAST_ADDR:
         return True
     return bool(_HEX_ID_RE.match(addr))
+
+
+def is_valid_address(addr: str) -> bool:
+    """True if *addr* is a valid CT2 to-address: 'C', '*', or 8-char hex.
+
+    Kept for backward compatibility — prefer is_valid_to_address for
+    the *to* field and is_valid_from_address for the *from* field.
+    """
+    return is_valid_to_address(addr)
 
 
 def is_controller(addr: str) -> bool:
@@ -103,9 +122,9 @@ def unpack(raw: str) -> Message | None:
     sig, frm, to, seq_str, mtype, encoded = parts
     if sig != PROTOCOL_SIG:
         return None
-    if not is_valid_address(frm):
+    if not is_valid_from_address(frm):
         return None
-    if not is_valid_address(to):
+    if not is_valid_to_address(to):
         return None
     if mtype not in _VALID_TYPES:
         return None
