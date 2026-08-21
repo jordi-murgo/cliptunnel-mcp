@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import queue
 import threading
 import time
@@ -27,6 +28,7 @@ from cliptunnel_mcp.transport import Transport
 
 _DEFAULT_SEQ_FILE = ".cliptunnel_controller_seq"
 
+logger = logging.getLogger("cliptunnel-controller")
 
 class SeqStore(Protocol):
     """Persistence for the Controller's last used command seq."""
@@ -190,9 +192,19 @@ class Controller:
             return result
 
     def _keepalive_loop(self) -> None:
-        """Background thread: ping idle remotes, mark dead ones."""
+        """Background thread: ping idle remotes, mark dead ones.
+
+        - Ping a remote only after 5 minutes (300s) of inactivity.
+        - If no response or ACK within 30s of the ping, mark as dead.
+        - The 10s loop interval is just the poll cycle; actual ping timing
+          is driven by last_seen, not the loop interval.
+        """
+        _PING_IDLE = 300.0    # ping after 5 min idle
+        _DEAD_TIMEOUT = 30.0  # dead if no response 30s after ping
+        _LOOP_INTERVAL = 10.0
+
         while self._running:
-            time.sleep(10)
+            time.sleep(_LOOP_INTERVAL)
             if not self._running:
                 break
             now = time.time()
@@ -200,9 +212,23 @@ class Controller:
                 for remote_id, info in list(self._registry.items()):
                     last_seen = info.get("last_seen", 0)
                     idle = now - last_seen
-                    if idle > 120:
-                        info["status"] = "dead"
-                    elif idle > 60 and info.get("status") == "alive":
+                    status = info.get("status", "alive")
+                    ping_sent_at = info.get("ping_sent_at")
+
+                    if status == "dead":
+                        continue
+
+                    if ping_sent_at is not None:
+                        # We sent a ping — check if it timed out
+                        if now - ping_sent_at > _DEAD_TIMEOUT:
+                            info["status"] = "dead"
+                            info["ping_sent_at"] = None
+                            logger.info("remote %s marked dead (no response to ping in %.0fs)", remote_id, _DEAD_TIMEOUT)
+                        # Still waiting for ping response — don't send another
+                        continue
+
+                    if idle > _PING_IDLE:
+                        # Idle too long — send a ping
                         self.seq += 1
                         ping_seq = self.seq
                         if self._store is not None:
@@ -216,6 +242,8 @@ class Controller:
                         ))
                         with self._slot_lock:
                             self._paced_write(wire)
+                        info["ping_sent_at"] = now
+                        logger.info("ping sent to %s (idle %.0fs)", remote_id, idle)
 
     def send_command(self, command: str, remote_id: str | None = None) -> concurrent.futures.Future:
         """Send *command* asynchronously — returns a Future immediately.
@@ -323,11 +351,11 @@ class Controller:
             if msg is None:
                 continue
 
-            # Track remote presence for any message from a remote.
             if msg.frm != CONTROLLER_ADDR:
                 with self._registry_lock:
                     if msg.frm in self._registry:
                         self._registry[msg.frm]["last_seen"] = time.time()
+                        self._registry[msg.frm]["ping_sent_at"] = None
             if msg.mtype == MsgType.ACK.value:
                 with self._slot_condition:
                     if self._pending_command_seq == msg.seq:

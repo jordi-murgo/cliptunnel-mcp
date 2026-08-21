@@ -345,54 +345,51 @@ class TestControllerRegistry(ControllerTestCase):
 
 
 class TestControllerKeepalive(ControllerTestCase):
-    def test_idle_remote_marked_dead_after_timeout(self):
-        """A remote with last_seen >120s ago is marked dead."""
+    def test_idle_remote_marked_dead_after_ping_timeout(self):
+        """A remote that was pinged and didn't respond in 30s is marked dead."""
         import time as _time
         controller = self.make_controller()
-        # Seed registry with a remote that's been idle 200s
-        old_time = _time.time() - 200
+        # Seed registry with a remote that was pinged 40s ago — no response
+        old_time = _time.time() - 40
         with controller._registry_lock:
             controller._registry["deadbeef"] = {
-                "os": "test", "last_seen": old_time, "status": "alive",
+                "os": "test",
+                "last_seen": _time.time() - 400,
+                "status": "alive",
+                "ping_sent_at": old_time,
             }
-        # Run one keepalive iteration manually
+        # Simulate one keepalive iteration
+        now = _time.time()
         with controller._registry_lock:
-            now = _time.time()
             for rid, info in controller._registry.items():
-                idle = now - info.get("last_seen", 0)
-                if idle > 120:
+                ping_sent_at = info.get("ping_sent_at")
+                if ping_sent_at is not None and now - ping_sent_at > 30:
                     info["status"] = "dead"
+                    info["ping_sent_at"] = None
         conns = controller.get_connections()
         self.assertEqual(conns["deadbeef"]["status"], "dead")
 
-    def test_idle_remote_gets_ping_after_60s(self):
-        """A remote idle >60s but <120s should be pinged, not marked dead."""
+    def test_idle_remote_not_pinged_before_5min(self):
+        """A remote idle <300s should not be pinged."""
         import time as _time
         controller = self.make_controller()
-        old_time = _time.time() - 80
         with controller._registry_lock:
             controller._registry["deadbeef"] = {
-                "os": "test", "last_seen": old_time, "status": "alive",
+                "os": "test", "last_seen": _time.time() - 120,
+                "status": "alive", "ping_sent_at": None,
             }
-        # Check the keepalive logic: idle >60 and alive -> ping, not dead
-        with controller._registry_lock:
-            now = _time.time()
-            for rid, info in controller._registry.items():
-                idle = now - info.get("last_seen", 0)
-                if idle > 120:
-                    info["status"] = "dead"
-                elif idle > 60 and info.get("status") == "alive":
-                    pass  # would send ping here
         conns = controller.get_connections()
         self.assertEqual(conns["deadbeef"]["status"], "alive")
+        self.assertIsNone(conns["deadbeef"].get("ping_sent_at"))
 
-    def test_recent_remote_not_pinged_or_marked_dead(self):
-        """A remote with recent last_seen should stay alive and not be pinged."""
+    def test_recent_remote_stays_alive(self):
+        """A remote with recent last_seen should stay alive."""
         import time as _time
         controller = self.make_controller()
         with controller._registry_lock:
             controller._registry["deadbeef"] = {
-                "os": "test", "last_seen": _time.time(), "status": "alive",
+                "os": "test", "last_seen": _time.time(),
+                "status": "alive", "ping_sent_at": None,
             }
         conns = controller.get_connections()
         self.assertEqual(conns["deadbeef"]["status"], "alive")
