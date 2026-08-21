@@ -312,6 +312,24 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
     info["shell"] = os.environ.get("SHELL", "")
     info["home"] = os.path.expanduser("~")
 
+    # ── Agent auth ─────────────────────────────────────────────────
+    try:
+        token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
+        if os.path.isfile(token_path):
+            with open(token_path, "r") as _f:
+                _tok = _f.read().strip()
+            info["agent_auth"] = "authenticated" if _tok else "no_token"
+        else:
+            info["agent_auth"] = "no_token"
+    except Exception:
+        info["agent_auth"] = "unknown"
+
+    # ── Shell version (Windows) ────────────────────────────────────
+    if platform.system() == "Windows":
+        info["shell_version"] = _windows_shell_version()
+    else:
+        info["shell_version"] = ""
+
     # ── CPU ─────────────────────────────────────────────────────────
     info["cpu_count"] = os.cpu_count() or 0
 
@@ -440,6 +458,35 @@ def _add_disk_info(info: dict) -> None:
     except Exception:
         pass
 
+
+def _windows_shell_version() -> str:
+    """Detect the user's shell and its version on Windows.
+
+    Checks for PowerShell first (pwsh or powershell), then falls back to cmd.
+    Returns a string like 'PowerShell 7.4.0' or 'cmd 10.0.26100.1' or 'unknown'.
+    """
+    import shutil
+    try:
+        for pwsh in ("pwsh", "powershell"):
+            if shutil.which(pwsh):
+                result = subprocess.run(
+                    [pwsh, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                    capture_output=True, text=True, check=False, timeout=5,
+                )
+                if result.returncode == 0:
+                    ver = result.stdout.strip()
+                    label = "PowerShell" if pwsh == "pwsh" else "Windows PowerShell"
+                    return f"{label} {ver}" if ver else label
+        # Fallback: cmd.exe
+        result = subprocess.run(
+            ["cmd", "/c", "ver"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if result.returncode == 0:
+            return f"cmd {result.stdout.strip()}"
+        return "unknown"
+    except Exception:
+        return "unknown"
 # ── agent ────────────────────────────────────────────────────────────────────
 
 def op_agent(req: dict) -> tuple[str, bool]:
