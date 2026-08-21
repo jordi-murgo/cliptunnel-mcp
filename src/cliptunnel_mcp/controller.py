@@ -179,9 +179,15 @@ class Controller:
         return BROADCAST_ADDR
 
     def get_connections(self) -> dict:
-        """Return a copy of the remote registry."""
+        """Return a copy of the remote registry with last_seen_ago."""
+        now = time.time()
         with self._registry_lock:
-            return dict(self._registry)
+            result = {}
+            for rid, info in self._registry.items():
+                entry = dict(info)
+                entry["last_seen_ago"] = round(now - info.get("last_seen", 0), 1)
+                result[rid] = entry
+            return result
 
     def _keepalive_loop(self) -> None:
         """Background thread: ping idle remotes, mark dead ones."""
@@ -189,7 +195,7 @@ class Controller:
             time.sleep(10)
             if not self._running:
                 break
-            now = time.monotonic()
+            now = time.time()
             with self._registry_lock:
                 for remote_id, info in list(self._registry.items()):
                     last_seen = info.get("last_seen", 0)
@@ -321,8 +327,7 @@ class Controller:
             if msg.frm != CONTROLLER_ADDR:
                 with self._registry_lock:
                     if msg.frm in self._registry:
-                        self._registry[msg.frm]["last_seen"] = time.monotonic()
-
+                        self._registry[msg.frm]["last_seen"] = time.time()
             if msg.mtype == MsgType.ACK.value:
                 with self._slot_condition:
                     if self._pending_command_seq == msg.seq:
@@ -355,7 +360,7 @@ class Controller:
                             with self._registry_lock:
                                 self._registry[msg.frm] = {
                                     **parsed,
-                                    "last_seen": time.monotonic(),
+                                    "last_seen": time.time(),
                                     "status": "alive",
                                 }
                     except (json.JSONDecodeError, TypeError):
