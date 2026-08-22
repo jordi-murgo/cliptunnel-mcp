@@ -1,13 +1,8 @@
-"""Optional AES-256-GCM encryption layer for the HTTPS transport.
+"""AES-256-GCM encryption layer for the HTTPS transport.
 
 When ``CLIPTUNNEL_AES_KEY`` is set, :class:`HttpsTransport` uses these helpers
 to encrypt the full CT3 wire string before writing it to the repeater and to
 decrypt it after reading.  The repeater never sees plaintext.
-
-The ``cryptography`` package is imported *deferred* (inside the functions)
-so the core ``cliptunnel-mcp`` package does not require it unless AES is
-actually used.  If ``CLIPTUNNEL_AES_KEY`` is set but ``cryptography`` is not
-installed, a clear :class:`ImportError` with an install hint is raised.
 
 Wire format::
 
@@ -24,6 +19,8 @@ from __future__ import annotations
 import base64
 import os
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 __all__ = ["encrypt", "decrypt", "parse_key"]
 
 # AES-256 requires a 32-byte key.
@@ -38,18 +35,10 @@ def encrypt(plaintext: str, key: bytes) -> str:
     :param plaintext: UTF-8 string to encrypt.
     :param key: 32-byte AES-256 key.
     :return: base64 string of ``nonce || ciphertext+tag``.
-    :raises ImportError: if ``cryptography`` is not installed.
     :raises ValueError: if *key* is not 32 bytes.
     """
     if len(key) != _KEY_LEN:
         raise ValueError(f"AES-256 key must be {_KEY_LEN} bytes, got {len(key)}")
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    except ImportError as exc:
-        raise ImportError(
-            "AES encryption requires the 'cryptography' package. "
-            "Install it with: pip install cryptography"
-        ) from exc
 
     nonce = os.urandom(_NONCE_LEN)
     aesgcm = AESGCM(key)
@@ -64,19 +53,11 @@ def decrypt(blob: str, key: bytes) -> str:
     :param blob: base64 string of ``nonce || ciphertext+tag``.
     :param key: 32-byte AES-256 key.
     :return: the original UTF-8 plaintext.
-    :raises ImportError: if ``cryptography`` is not installed.
     :raises ValueError: if *key* is not 32 bytes or the blob is too short.
     :raises Exception: if the tag verification fails (tampered or wrong key).
     """
     if len(key) != _KEY_LEN:
         raise ValueError(f"AES-256 key must be {_KEY_LEN} bytes, got {len(key)}")
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    except ImportError as exc:
-        raise ImportError(
-            "AES encryption requires the 'cryptography' package. "
-            "Install it with: pip install cryptography"
-        ) from exc
 
     raw = base64.b64decode(blob)  # raises binascii.Error on invalid base64
     if len(raw) < _NONCE_LEN:

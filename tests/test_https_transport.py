@@ -237,25 +237,6 @@ class TestAES(unittest.TestCase):
         self.assertEqual(t.read(), "round-trip-text")
         t.close()
 
-    def test_init_raises_when_cryptography_missing_with_aes_key(self) -> None:
-        key = b"0" * 32
-        import builtins
-
-        real_import = builtins.__import__
-
-        def mock_import(name, *args, **kwargs):
-            if name.startswith("cryptography"):
-                raise ImportError("simulated")
-            return real_import(name, *args, **kwargs)
-
-        with mock.patch.object(builtins, "__import__", mock_import):
-            with self.assertRaises(TransportError):
-                HttpsTransport(
-                    repeater_url="http://x",
-                    bearer_token="t",
-                    aes_key=key,
-                    http_client=FakeRepeater(),
-                )
 
 
 # ---------------------------------------------------------------------------

@@ -862,7 +862,7 @@ def create_server():
                 f"CLIPTUNNEL_REPEATER_URL={repeater_url}",
                 f"CLIPTUNNEL_REPEATER_TOKEN={agent_token}",
             ]
-            pip_command = "pip install cliptunnel-mcp[https]"
+            pip_command = "pip install cliptunnel-mcp"
 
             result: dict = {
                 "transport": "https",

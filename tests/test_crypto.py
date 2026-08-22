@@ -1,4 +1,4 @@
-"""Tests for the optional AES-256-GCM crypto layer (src/cliptunnel_mcp/crypto.py).
+"""Tests for the AES-256-GCM crypto layer (src/cliptunnel_mcp/crypto.py).
 
 TDD order: these tests were written before crypto.py existed (RED), then
 crypto.py was implemented to make them pass (GREEN), then edge cases were

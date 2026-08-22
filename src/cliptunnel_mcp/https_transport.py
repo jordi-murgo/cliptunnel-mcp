@@ -200,16 +200,6 @@ class HttpsTransport:
         self._value: str = ""
         self._revision: int = 0
 
-        # AES guard: probe-import cryptography if aes_key is set.
-        if aes_key is not None:
-            try:
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
-            except ImportError as exc:
-                raise TransportError(
-                    "AES encryption is configured (CLIPTUNNEL_AES_KEY is set) "
-                    "but the 'cryptography' package is not installed. "
-                    "Install with: pip install cliptunnel-mcp[https]"
-                ) from exc
 
         self._running = True
         self._sse_response: StreamResponse | None = None

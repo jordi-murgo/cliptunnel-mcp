@@ -507,18 +507,16 @@ The repeater state is ephemeral (in-memory). On restart, peers self-heal via the
 The `remote_install_instructions` MCP tool returns installation instructions for the remote agent based on the Controller's active transport:
 
 - **Clipboard**: returns `pip install cliptunnel-mcp` and `cliptunnel-agent` (no env vars needed).
-- **HTTPS**: returns `pip install cliptunnel-mcp[https]`, the repeater URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
+- **HTTPS**: returns `pip install cliptunnel-mcp`, the repeater URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
 
 > **Security**: the tool output contains sensitive config (tokens, AES key). Do not log it or share it insecurely. The tool returns instructions for the operator, not a script that auto-executes.
 
 ### Install extras
 
 ```bash
-pip install cliptunnel-mcp          # core + clipboard transport
+pip install cliptunnel-mcp          # core + clipboard transport + AES encryption (cryptography included)
 pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
-pip install cliptunnel-mcp[https]   # + AES encryption (cryptography>=42)
 pip install cliptunnel-mcp[repeater] # + repeater service (stdlib only)
-```
 ## License
 
 MIT — see [LICENSE](https://github.com/jordi-murgo/cliptunnel-mcp/blob/main/LICENSE).
