@@ -13,8 +13,8 @@ import pytest
 
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
 from cliptunnel_mcp.https_transport import HttpsTransport
+from cliptunnel_mcp.encrypted_transport import EncryptedTransport
 from cliptunnel_mcp.transport_factory import build_transport
-
 
 class TestDefaults:
     def test_no_env_returns_clipboard(self, monkeypatch):
@@ -76,7 +76,7 @@ class TestAESKey:
         monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
         monkeypatch.setenv("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 32).decode())
         t = build_transport()
-        assert isinstance(t, HttpsTransport)
+        assert isinstance(t, EncryptedTransport)
         t.close()
 
     def test_wrong_length_aes_key_raises(self, monkeypatch):

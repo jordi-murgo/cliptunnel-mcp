@@ -22,7 +22,6 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Iterator, Protocol, runtime_checkable
 
-from cliptunnel_mcp import crypto
 
 __all__ = [
     "HttpClient",
@@ -182,7 +181,6 @@ class HttpsTransport:
         *,
         repeater_url: str,
         bearer_token: str,
-        aes_key: bytes | None = None,
         poll_timeout: float = 30.0,
         sse_reconnect_delay: float = 1.0,
         request_timeout: float = 15.0,
@@ -190,7 +188,6 @@ class HttpsTransport:
     ) -> None:
         self._repeater_url = repeater_url.rstrip("/")
         self._bearer_token = bearer_token
-        self._aes_key = aes_key
         self._poll_timeout = poll_timeout
         self._sse_reconnect_delay = sse_reconnect_delay
         self._request_timeout = request_timeout
@@ -224,11 +221,6 @@ class HttpsTransport:
         :class:`TransportError` on other failures.
         """
         payload = value
-        if self._aes_key is not None:
-            try:
-                payload = crypto.encrypt(value, self._aes_key)
-            except (ValueError, ImportError) as exc:
-                raise TransportError(f"encryption failed: {exc}") from exc
 
         headers = {
             "Authorization": f"Bearer {self._bearer_token}",
@@ -347,18 +339,9 @@ class HttpsTransport:
         self._sse_response = None
 
     def _handle_sse_write(self, payload: dict[str, object]) -> None:
-        """Process an SSE ``write`` event: decrypt, update cache, bump revision."""
+        """Process an SSE ``write`` event: update cache, bump revision."""
         event_revision = payload.get("revision", 0)
-        raw_value = payload.get("value", "")
-
-        if self._aes_key is not None:
-            try:
-                value = crypto.decrypt(raw_value, self._aes_key)
-            except (ValueError, ImportError) as exc:
-                _log.warning("SSE: decryption failed, skipping event: %s", exc)
-                return
-        else:
-            value = raw_value
+        value = payload.get("value", "")
 
         with self._condition:
             self._value = value
@@ -393,12 +376,6 @@ class HttpsTransport:
             _log.warning("snapshot parse failed: %s", exc)
             return
 
-        if self._aes_key is not None:
-            try:
-                snapshot_value = crypto.decrypt(snapshot_value, self._aes_key)
-            except (ValueError, ImportError) as exc:
-                _log.warning("snapshot decryption failed: %s", exc)
-                return
 
         with self._condition:
             self._value = snapshot_value

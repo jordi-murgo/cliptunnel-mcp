@@ -10,7 +10,6 @@ import time
 import unittest
 from unittest import mock
 
-from cliptunnel_mcp.crypto import encrypt
 from cliptunnel_mcp.https_transport import (
     HttpsTransport,
     TransportAuthError,
@@ -200,43 +199,6 @@ class TestSSE(unittest.TestCase):
         time.sleep(0.5)  # SSE thread reconnects and resyncs
         self.assertEqual(t.read(), "during-disconnect")
         t.close()
-
-
-# ---------------------------------------------------------------------------
-# AES encryption
-# ---------------------------------------------------------------------------
-
-class TestAES(unittest.TestCase):
-    def test_aes_write_encrypts_before_post(self) -> None:
-        key = b"0" * 32
-        t, fake = make_transport(aes_key=key)
-        t.write("plaintext-secret")
-        self.assertNotEqual(fake.writes[-1], "plaintext-secret")
-        t.close()
-
-    def test_aes_sse_decrypts_before_cache(self) -> None:
-        key = b"0" * 32
-        t, fake = make_transport(aes_key=key)
-        blob = encrypt("decrypted-by-sse", key)
-        fake.post_slot(blob, token="t")
-        time.sleep(0.3)
-        self.assertEqual(t.read(), "decrypted-by-sse")
-        t.close()
-
-    def test_plaintext_passthrough_no_crypto_import(self) -> None:
-        t, fake = make_transport()  # aes_key=None
-        t.write("plain")
-        self.assertEqual(fake.writes[-1], "plain")  # no encryption
-        t.close()
-
-    def test_aes_round_trip_through_transport(self) -> None:
-        key = b"0" * 32
-        t, fake = make_transport(aes_key=key)
-        t.write("round-trip-text")
-        self.assertNotEqual(fake.writes[-1], "round-trip-text")
-        self.assertEqual(t.read(), "round-trip-text")
-        t.close()
-
 
 
 # ---------------------------------------------------------------------------
