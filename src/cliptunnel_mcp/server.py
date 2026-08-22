@@ -77,7 +77,7 @@ def _send(fn, *args, **kwargs) -> str:
 
 # ── Controller helpers (ported from vulcano-helper Host) ─────────────────────
 
-def shell_auto(cmd: str, sync_timeout: float = 10.0, remote_id: str | None = None) -> dict:
+def shell_auto(cmd: str, sync_timeout: float = 10.0, timeout: float = 60.0, remote_id: str | None = None) -> dict:
     """Send a shell command with auto-sync-then-async behavior.
 
     Waits up to *sync_timeout* seconds for the Agent to respond. If the
@@ -102,7 +102,7 @@ def shell_auto(cmd: str, sync_timeout: float = 10.0, remote_id: str | None = Non
             "error": "no transport configured (call set_controller first)",
         }
     future = controller.send_command(
-        json.dumps({"op": "shell", "cmd": cmd}), remote_id=remote_id
+        json.dumps({"op": "shell", "cmd": cmd, "timeout": timeout}), remote_id=remote_id
     )
     try:
         result = future.result(timeout=sync_timeout)
@@ -470,18 +470,20 @@ def create_server():
     # ── Shell ────────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_shell(cmd: str, sync_timeout: float = 10.0, remote_id: str | None = None) -> str:
+    def remote_shell(cmd: str, sync_timeout: float = 10.0, timeout: float = 60.0, remote_id: str | None = None) -> str:
         """Execute a shell command on the remote machine (Agent side).
 
         Waits up to *sync_timeout* seconds (default 10) for the command to
         finish. Fast commands return JSON
         ``{"status": "finished", "job_id": null, "elapsed", "stdout", "stderr", "returncode"}``;
         slower ones return ``{"status": "running", "job_id": str}`` — poll
-        with remote_shell_result. The Agent-side operation enforces a 60 s
-        subprocess timeout.
-        """
-        return json.dumps(shell_auto(cmd, sync_timeout=sync_timeout, remote_id=remote_id))
+        with remote_shell_result.
 
+        The *timeout* parameter (default 60s) controls how long the Agent
+        waits for the subprocess to finish before killing it. Increase it
+        for long-running commands.
+        """
+        return json.dumps(shell_auto(cmd, sync_timeout=sync_timeout, timeout=timeout, remote_id=remote_id))
     @mcp.tool()
     def remote_shell_result(job_id: str) -> str:
         """Poll for the result of an async shell command started by remote_shell.

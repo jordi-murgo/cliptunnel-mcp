@@ -17,7 +17,7 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.operations import dispatch
 
-__version__ = "0.5.4"
+__version__ = "0.6.0"
 
 __all__ = [
     "BROADCAST_ADDR",

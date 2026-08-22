@@ -72,20 +72,24 @@ def op_shell(req: dict) -> tuple[str, bool]:
     Always returns a JSON string containing all three fields regardless of
     success or failure. The error flag is True only on internal failures
     (timeout, exception, missing cmd).
+
+    The timeout defaults to 60 seconds but can be overridden by including
+    a ``timeout`` field (in seconds) in the request.
     """
     cmd = req.get("cmd")
     if not cmd:
         return (json.dumps({"stdout": "", "stderr": "missing 'cmd' field", "returncode": -1}), True)
+    timeout = req.get("timeout", 60)
     try:
         result = subprocess.run(
             cmd,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return (json.dumps({"stdout": "", "stderr": "Command timed out", "returncode": -1}), True)
+        return (json.dumps({"stdout": "", "stderr": f"Command timed out after {timeout}s", "returncode": -1}), True)
     except Exception as exc:
         return (json.dumps({"stdout": "", "stderr": str(exc), "returncode": -1}), True)
 
