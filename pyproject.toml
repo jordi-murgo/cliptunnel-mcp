@@ -17,7 +17,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["mcp", "clipboard", "tunnel", "remote", "agent", "controller", "citrix"]
 requires-python = ">=3.10"
-dependencies = ["clipboard-event>=0.2.0"]
+dependencies = ["clipboard-event>=0.2.0", "cryptography>=42"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -39,6 +39,7 @@ cliptunnel-agent = "cliptunnel_mcp.agent:main"
 
 [project.optional-dependencies]
 server = ["mcp>=1.2,<2"]
+
 
 [project.urls]
 Homepage = "https://github.com/jordi-murgo/cliptunnel-mcp"

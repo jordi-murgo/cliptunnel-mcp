@@ -56,6 +56,7 @@ EXPECTED_TOOLS = {
     "remote_agent_list",
     "remote_agent_clear",
     "remote_agent_end",
+    "remote_install_instructions",
 }
 
 
@@ -355,6 +356,62 @@ class TestAgentTools(ServerTestCase):
         result = self.call("remote_agent_login_status")
         data = json.loads(result)
         self.assertIn(data["status"], ("idle", "polling", "done", "error"))
+
+
+class TestRemoteInstallInstructions(ServerTestCase):
+    def test_clipboard_variant(self):
+        """Default (clipboard) transport returns minimal instructions."""
+        old = os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "clipboard")
+            self.assertEqual(data["env_vars"], {})
+            self.assertIn("cliptunnel-agent", data["agent_command"])
+        finally:
+            if old is not None:
+                os.environ["CLIPTUNNEL_TRANSPORT"] = old
+
+    def test_https_variant(self):
+        """HTTPS transport returns full config with repeater URL + token."""
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "https"
+        os.environ["CLIPTUNNEL_REPEATER_URL"] = "https://relay.example.com"
+        os.environ["CLIPTUNNEL_REPEATER_TOKEN"] = "secret123"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "https")
+            self.assertEqual(data["repeater_url"], "https://relay.example.com")
+            self.assertEqual(data["agent_token"], "secret123")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_TRANSPORT"], "https")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_REPEATER_URL"], "https://relay.example.com")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_REPEATER_TOKEN"], "secret123")
+            self.assertNotIn("CLIPTUNNEL_AES_KEY", data["env_vars"])
+            self.assertNotIn("aes_key", data)
+            self.assertIn("cliptunnel-agent", data["agent_command"])
+            self.assertIn("CLIPTUNNEL_REPEATER_TOKEN=secret123", data["agent_command"])
+        finally:
+            os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+            os.environ.pop("CLIPTUNNEL_REPEATER_URL", None)
+            os.environ.pop("CLIPTUNNEL_REPEATER_TOKEN", None)
+
+    def test_https_with_aes_key(self):
+        """HTTPS + AES key includes aes_key field in output."""
+        import base64
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "https"
+        os.environ["CLIPTUNNEL_REPEATER_URL"] = "https://relay.example.com"
+        os.environ["CLIPTUNNEL_REPEATER_TOKEN"] = "secret123"
+        aes_b64 = base64.b64encode(b"0" * 32).decode()
+        os.environ["CLIPTUNNEL_AES_KEY"] = aes_b64
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["aes_key"], aes_b64)
+            self.assertIn("CLIPTUNNEL_AES_KEY", data["env_vars"])
+        finally:
+            for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_REPEATER_URL",
+                      "CLIPTUNNEL_REPEATER_TOKEN", "CLIPTUNNEL_AES_KEY"):
+                os.environ.pop(k, None)
 
 
 if __name__ == "__main__":

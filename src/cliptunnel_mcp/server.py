@@ -31,7 +31,7 @@ import base64
 import concurrent.futures
 import json
 import logging
-import sys
+import os
 import threading
 import time
 import uuid
@@ -831,6 +831,64 @@ def create_server():
             model.
         """
         return _send(agent_list, remote_id=remote_id)
+
+    @mcp.tool()
+    def remote_install_instructions() -> str:
+        """Return instructions for installing and configuring the Agent on a
+        remote machine, tailored to the Controller's active transport.
+
+        Returns JSON with the transport type, connection parameters,
+        environment variables, and the exact pip + cliptunnel-agent commands
+        to run on the remote side.
+
+        WARNING: Output contains bearer tokens and AES keys. Do not log
+        or expose this output beyond the operator.
+        """
+        transport = os.environ.get("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
+
+        if transport == "https":
+            repeater_url = os.environ.get("CLIPTUNNEL_REPEATER_URL", "")
+            agent_token = os.environ.get("CLIPTUNNEL_REPEATER_TOKEN", "")
+            aes_key_raw = os.environ.get("CLIPTUNNEL_AES_KEY")
+
+            env_vars = {
+                "CLIPTUNNEL_TRANSPORT": "https",
+                "CLIPTUNNEL_REPEATER_URL": repeater_url,
+                "CLIPTUNNEL_REPEATER_TOKEN": agent_token,
+            }
+
+            prefix_parts = [
+                f"CLIPTUNNEL_TRANSPORT=https",
+                f"CLIPTUNNEL_REPEATER_URL={repeater_url}",
+                f"CLIPTUNNEL_REPEATER_TOKEN={agent_token}",
+            ]
+            pip_command = "pip install cliptunnel-mcp"
+
+            result: dict = {
+                "transport": "https",
+                "repeater_url": repeater_url,
+                "agent_token": agent_token,
+                "env_vars": env_vars,
+                "pip_command": pip_command,
+            }
+
+            if aes_key_raw:
+                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
+                result["aes_key"] = aes_key_raw
+                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={aes_key_raw}")
+
+            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
+            result["agent_command"] = agent_command
+            return json.dumps(result)
+
+        # clipboard (default)
+        result = {
+            "transport": "clipboard",
+            "env_vars": {},
+            "pip_command": "pip install cliptunnel-mcp",
+            "agent_command": "cliptunnel-agent",
+        }
+        return json.dumps(result)
     return mcp
 
 
@@ -851,11 +909,11 @@ def main() -> None:
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+    from cliptunnel_mcp.transport_factory import build_transport
 
-    transport = ClipboardTransport()
+    transport = build_transport()
     set_controller(Controller(transport=transport))
-    logger.info("Controller wired to local OS clipboard transport")
+    logger.info("Controller wired to %s transport", transport.backend_name)
     create_server().run(transport="stdio")
 
 
