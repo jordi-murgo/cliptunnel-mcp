@@ -6,7 +6,7 @@ Operate locked-down remote machines through their clipboard or an HTTPS repeater
 
 `cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-**v0.7.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, and clipboard preservation that restores the user's clipboard after every exchange.
+**v0.8.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, and an HTTPS repeater transport with optional AES-256-GCM encryption.
 
 The package ships four layers:
 
@@ -140,7 +140,7 @@ pip install cliptunnel-mcp          # core + cliptunnel-agent binary
 pip install cliptunnel-mcp[server]  # adds MCP server binary (mcp>=1.2,<2)
 ```
 
-Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications).
+Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications), `cryptography>=42` (AES-256-GCM encryption).
 
 | Binary              | Extra needed | Purpose                                      |
 |---------------------|--------------|----------------------------------------------|
@@ -184,11 +184,11 @@ The server broadcasts an announce on startup, discovers connected remotes and an
 ### Controller only (no MCP)
 
 ```python
-from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+from cliptunnel_mcp.transport_factory import build_transport
 from cliptunnel_mcp import Controller
 import json
 
-controller = Controller(transport=ClipboardTransport())
+controller = Controller(transport=build_transport())
 
 # Send to a specific remote
 future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}), remote_id="R1b2c3d4")
@@ -202,13 +202,14 @@ connections = controller.get_connections()
 ### Programmatic Agent
 
 ```python
-from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+from cliptunnel_mcp.transport_factory import build_transport
 from cliptunnel_mcp import Agent
 from cliptunnel_mcp.operations import dispatch
 
-agent = Agent(transport=ClipboardTransport(), handler=dispatch)
+agent = Agent(transport=build_transport(), handler=dispatch)
 # Agent generates its own remote_id, registers automatically, and heartbeats every 120s.
 # Disable the heartbeat with heartbeat_secs=0 (or CLIPTUNNEL_HEARTBEAT_SECS=0).
+# Set CLIPTUNNEL_TRANSPORT=https to use the HTTPS repeater instead of the clipboard.
 ```
 
 ## MCP tools
@@ -339,6 +340,25 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 | `write(text: str)` | Write to the clipboard as a self-write. |
 | `restore_user_clipboard() -> bool` | Guarded restore of the backed-up user content; `True` on success, `False` if the slot was touched by another writer or no backup exists. |
 
+### `HttpsTransport`
+
+| Method | Description |
+|--------|-------------|
+| `read() -> str` | Return the current cached value (never blocks, never raises). |
+| `write(value: str)` | Encrypt if `aes_key` set, POST to repeater, bump revision, notify waiters. Raises `TransportAuthError` on 401, `TransportError` on other failures. |
+| `revision` property | Current revision counter. |
+| `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
+| `close()` | Stop the SSE daemon thread. Idempotent. |
+| `backend_name` property | Returns `"https"`. |
+
+Constructor parameters: `repeater_url` (required), `bearer_token` (required), `aes_key` (optional, 32 bytes), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `poll_timeout`, `request_timeout`.
+
+### `build_transport()` factory
+
+| Function | Description |
+|----------|-------------|
+| `build_transport() -> Transport` | Read `CLIPTUNNEL_TRANSPORT` env var and return a `ClipboardTransport` (default) or `HttpsTransport`. Raises `ValueError` on missing required env vars or unknown transport. |
+
 ### Protocol primitives
 
 | Symbol | Description |
@@ -374,6 +394,7 @@ The `ClipboardTransport` adapts clipboard-event to the `Transport` and `Revision
 | Linux / Wayland | Tested | clipboard-event (wl-paste --watch) | Same |
 | Linux / X11 | Core works | clipboard-event (xclip polling) | Same |
 
+
 ## Development
 
 ```bash
@@ -383,7 +404,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (366 tests)
+# Run the test suite (365 tests)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -478,12 +499,10 @@ If `CLIPTUNNEL_AES_KEY` is not set, the transport passes plaintext (base64 CT3).
 The repeater is a small stdlib-only HTTP service (no third-party deps):
 
 ```bash
-# Install with the repeater extra (stdlib only, no additional deps)
-pip install cliptunnel-mcp[repeater]
-
-# Run the repeater
+# The repeater is stdlib-only (no additional deps), included in the core package.
 python -m cliptunnel_mcp.repeater
-``+
+```
+
 Repeater environment variables:
 
 | Variable | Default | Description |
@@ -516,7 +535,8 @@ The `remote_install_instructions` MCP tool returns installation instructions for
 ```bash
 pip install cliptunnel-mcp          # core + clipboard transport + AES encryption (cryptography included)
 pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
-pip install cliptunnel-mcp[repeater] # + repeater service (stdlib only)
+```
+
 ## License
 
 MIT — see [LICENSE](https://github.com/jordi-murgo/cliptunnel-mcp/blob/main/LICENSE).
