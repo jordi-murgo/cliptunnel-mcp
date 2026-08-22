@@ -3,20 +3,25 @@ from __future__ import annotations
 
 import threading
 import unittest
+from types import SimpleNamespace
 
 from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
     CONTROLLER_ADDR,
+    PROTOCOL_SIG,
     Message,
     MsgType,
     pack,
     unpack,
 )
+
+from cliptunnel_mcp.clipboard_transport import ClipboardTransport
 from cliptunnel_mcp.transport import Transport
 from tests.clipboard_slot import ClipboardSlot
 
-# Fixed test remote ID — 8-char hex, used everywhere an agent address is needed.
-TEST_REMOTE_ID = "deadbeef"
+# Fixed test IDs — CT3 format: R/C + 7 hex.
+TEST_REMOTE_ID = "R1a2b3c4"
+TEST_CONTROLLER_ID = "C1a2b3c4"
 
 
 def wire(frm: str, to: str, seq: int, kind: MsgType, payload: str = "") -> str:
@@ -39,15 +44,15 @@ class ClipboardSlotContracts(unittest.TestCase):
         self.assertEqual(self.slot.revision, 0)
 
     def test_write_replaces_value_and_bumps_revision(self):
-        self.slot.write(wire(CONTROLLER_ADDR, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work"))
+        self.slot.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work"))
         self.assertEqual(self.slot.revision, 1)
-        self.slot.write(wire(TEST_REMOTE_ID, CONTROLLER_ADDR, 1, MsgType.ACK))
+        self.slot.write(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ACK))
         self.assertEqual(self.slot.revision, 2)
         self.assertTrue(is_message(self.slot.read(), MsgType.ACK, 1))
 
     def test_overwrite_loses_previous_value_last_writer_wins(self):
-        command = wire(CONTROLLER_ADDR, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work")
-        stale = wire(TEST_REMOTE_ID, CONTROLLER_ADDR, 99, MsgType.RESPONSE, "unrelated")
+        command = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work")
+        stale = wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 99, MsgType.RESPONSE, "unrelated")
         self.slot.write(command)
         self.slot.overwrite(stale)
         self.assertEqual(self.slot.read(), stale)
@@ -65,8 +70,8 @@ class ClipboardSlotContracts(unittest.TestCase):
         current = self.slot.revision
         self.assertEqual(self.slot.wait_for_revision(after=current, timeout=0.05), current)
 
-    def test_wait_for_write_observes_ct2_wire_message(self):
-        command = wire(CONTROLLER_ADDR, TEST_REMOTE_ID, 7, MsgType.COMMAND, "echo 'a|b'")
+    def test_wait_for_write_observes_ct3_wire_message(self):
+        command = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 7, MsgType.COMMAND, "echo 'a|b'")
         self.slot.write(command)
         count, observed = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.COMMAND, 7)
@@ -75,8 +80,8 @@ class ClipboardSlotContracts(unittest.TestCase):
         self.assertEqual(observed, command)
 
     def test_wait_for_write_scans_only_after_index(self):
-        first = wire(CONTROLLER_ADDR, TEST_REMOTE_ID, 1, MsgType.COMMAND)
-        second = wire(CONTROLLER_ADDR, TEST_REMOTE_ID, 2, MsgType.COMMAND)
+        first = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND)
+        second = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 2, MsgType.COMMAND)
         self.slot.write(first)
         self.slot.write(second)
         count, observed = self.slot.wait_for_write(
@@ -113,24 +118,25 @@ class ControllerSlotContracts(unittest.TestCase):
             poll_interval=0.001,
             initial_seq=0,
             persist_seq=False,
+            controller_id=TEST_CONTROLLER_ID,
         )
         self.addCleanup(controller.close)
         return controller
 
     def test_unrelated_response_does_not_acknowledge_current_command(self):
-        """send_command('current') writes CT2 COMMAND seq=2 (C→remote); the slot
+        """send_command('current') writes CT3 COMMAND seq=2 (C→remote); the slot
         is overwritten by a remote→Controller RESPONSE seq=99 ('unrelated'). The
         unrelated response must not acknowledge the pending command: the
         Controller retransmits COMMAND seq=2 as a later slot write."""
         controller = self.make_controller()
-        # seq=1 is consumed by the broadcast register on startup.
+        # seq=1 is consumed by the announce on startup.
         controller.send_command("current")
         first, _ = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.COMMAND, 2)
         )
 
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, CONTROLLER_ADDR, 99, MsgType.RESPONSE, "unrelated")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 99, MsgType.RESPONSE, "unrelated")
         )
 
         self.slot.wait_for_write(
@@ -147,14 +153,14 @@ class ControllerSlotContracts(unittest.TestCase):
         first_write, _ = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.COMMAND, 2)
         )
-        self.slot.overwrite(wire(TEST_REMOTE_ID, CONTROLLER_ADDR, 2, MsgType.ACK))
+        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.ACK))
         controller.send_command("second")
         second_write, _ = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.COMMAND, 3), after=first_write
         )
 
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, CONTROLLER_ADDR, 2, MsgType.RESPONSE, "first-result")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "first-result")
         )
         self.assertEqual(first_future.result(timeout=1), "first-result")
 
@@ -173,9 +179,8 @@ class ControllerSlotContracts(unittest.TestCase):
         )
 
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, CONTROLLER_ADDR, 2, MsgType.RESPONSE, "done")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "done")
         )
-
         self.assertEqual(future.result(timeout=1), "done")
 
 
@@ -197,9 +202,10 @@ class AgentSlotContracts(unittest.TestCase):
         )
         self.addCleanup(agent.close)
         return agent
+
     def deliver_command(self, agent, seq: int, payload: str = "work") -> None:
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, agent.remote_id, seq, MsgType.COMMAND, payload)
+            wire(TEST_CONTROLLER_ID, agent.remote_id, seq, MsgType.COMMAND, payload)
         )
 
     def test_new_command_does_not_acknowledge_unobserved_pending_response(self):
@@ -258,7 +264,7 @@ class AgentSlotContracts(unittest.TestCase):
         first_error, _ = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ERROR, 1)
         )
-        self.slot.overwrite(wire(CONTROLLER_ADDR, agent.remote_id, 1, MsgType.ACK))
+        self.slot.overwrite(wire(TEST_CONTROLLER_ID, agent.remote_id, 1, MsgType.ACK))
         self.deliver_command(agent, 1)
 
         _, duplicate = self.slot.wait_for_write(
@@ -271,17 +277,17 @@ class AgentSlotContracts(unittest.TestCase):
         without processing or generating a response."""
         agent = self.make_agent()
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, agent.remote_id, 10, MsgType.PING)
+            wire(TEST_CONTROLLER_ID, agent.remote_id, 10, MsgType.PING)
         )
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 10))
 
     def test_message_addressed_to_different_remote_is_ignored(self):
         """A message with to=different_hex_id is ignored by this agent."""
         self.make_agent()
-        other_id = "cafef00d"
+        other_id = "Rcafef00"
         # Write a command addressed to a different remote
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, other_id, 1, MsgType.COMMAND, "not for me")
+            wire(TEST_CONTROLLER_ID, other_id, 1, MsgType.COMMAND, "not for me")
         )
         # No ACK should appear within a short window
         with self.assertRaises(AssertionError):
@@ -289,17 +295,17 @@ class AgentSlotContracts(unittest.TestCase):
                 lambda value: is_message(value, MsgType.ACK, 1), timeout=0.05
             )
 
-    def test_broadcast_register_triggers_delayed_registration(self):
-        """A broadcast register command causes the Agent to schedule a delayed
+    def test_announce_triggers_delayed_registration(self):
+        """An ANNOUNCE from a controller causes the Agent to schedule a delayed
         registration response (a RESPONSE with sysinfo payload) to the
         controller."""
         import json
 
         agent = self.make_agent()
-        # Deliver a broadcast register command
+        # Deliver an ANNOUNCE from a controller
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, BROADCAST_ADDR, 50, MsgType.COMMAND,
-                 json.dumps({"op": "register"}))
+            wire(TEST_CONTROLLER_ID, BROADCAST_ADDR, 50, MsgType.ANNOUNCE,
+                 json.dumps({"role": "controller", "name": "test", "version": 3}))
         )
         # The registration response arrives after a random delay (0.1–4.0s).
         # Wait up to 5s for a RESPONSE from the agent.
@@ -309,10 +315,106 @@ class AgentSlotContracts(unittest.TestCase):
         msg = unpack(reg)
         self.assertIsNotNone(msg)
         self.assertEqual(msg.frm, agent.remote_id)
-        self.assertEqual(msg.to, CONTROLLER_ADDR)
+        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
         # The payload should be sysinfo JSON with an "os" field.
         payload = json.loads(msg.payload)
         self.assertIn("os", payload)
+
+
+class FakeOSClipboard:
+    """Duck-typed clipboard_event.Clipboard double backed by an OS slot.
+
+    ``write`` models this process writing the OS clipboard (no change
+    callback); ``write_external`` models another actor writing it, with the
+    monitor observing the change and firing the on_change callback.
+    """
+
+    def __init__(self, initial: str = "") -> None:
+        self._os_value = initial
+        self._callback = None
+        self.closed = False
+
+    def read(self) -> str:
+        return self._os_value
+
+    def write(self, value: str) -> None:
+        self._os_value = value
+
+    def on_change(self, callback):
+        self._callback = callback
+        return SimpleNamespace(cancel=lambda: None)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def write_external(self, value: str) -> None:
+        self._os_value = value
+        if self._callback is not None:
+            self._callback(value)
+
+
+class UserClipboardContracts(unittest.TestCase):
+    """Backup of user clipboard content and the guarded restore."""
+
+    def make_transport(self, initial: str = "") -> tuple[ClipboardTransport, FakeOSClipboard]:
+        fake = FakeOSClipboard(initial)
+        transport = ClipboardTransport(clipboard=fake)
+        self.addCleanup(transport.close)
+        return transport, fake
+
+    def test_external_non_protocol_change_is_backed_up_and_restorable(self):
+        transport, fake = self.make_transport()
+        fake.write_external("user notes")
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        self.assertTrue(transport.restore_user_clipboard())
+        self.assertEqual(fake.read(), "user notes")
+
+    def test_protocol_traffic_is_never_backed_up(self):
+        transport, fake = self.make_transport()
+        fake.write_external(
+            wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 9, MsgType.COMMAND, "other node")
+        )
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        self.assertFalse(transport.restore_user_clipboard())
+        self.assertNotEqual(fake.read(), PROTOCOL_SIG + "anything")
+
+    def test_restore_declines_when_no_backup_stored(self):
+        transport, fake = self.make_transport()
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        self.assertFalse(transport.restore_user_clipboard())
+
+    def test_restore_declines_when_clipboard_changed_after_last_self_write(self):
+        transport, fake = self.make_transport()
+        fake.write_external("user notes")
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        fake.write_external("another app took the slot")
+        self.assertFalse(transport.restore_user_clipboard())
+        self.assertEqual(fake.read(), "another app took the slot")
+
+    def test_initial_clipboard_content_is_backed_up_on_construction(self):
+        transport, fake = self.make_transport(initial="preset text")
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        self.assertTrue(transport.restore_user_clipboard())
+        self.assertEqual(fake.read(), "preset text")
+
+    def test_empty_external_change_is_not_backed_up(self):
+        transport, fake = self.make_transport()
+        fake.write_external("")
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        self.assertFalse(transport.restore_user_clipboard())
+
+    def test_restore_write_is_a_self_write(self):
+        transport, fake = self.make_transport(initial="preset text")
+        transport.write(wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND))
+        revision = transport.revision
+        self.assertTrue(transport.restore_user_clipboard())
+        self.assertEqual(transport.read(), "preset text")
+        self.assertGreater(transport.revision, revision)
+
+    def test_restore_declines_before_any_self_write(self):
+        transport, fake = self.make_transport()
+        fake.write_external("user notes")
+        self.assertFalse(transport.restore_user_clipboard())
 
 
 if __name__ == "__main__":

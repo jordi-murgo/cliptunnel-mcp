@@ -1,4 +1,4 @@
-"""Controller endpoint (role C) of the ClipTunnel CT2 protocol.
+"""Controller endpoint of the ClipTunnel CT3 protocol.
 
 Runs on the operator's machine. Sends commands to the Agent through an
 injected slot-compatible :class:`~cliptunnel_mcp.transport.Transport` with
@@ -6,9 +6,13 @@ full-duplex async behavior: ``send_command`` returns a ``Future``
 immediately while background threads dispatch commands serially and read
 responses.
 
+CT3 introduces multi-controller support: each Controller generates a unique
+C+7hex ID and announces its presence via the ANNOUNCE message type. Other
+controllers on the shared clipboard are tracked but not spoken to directly.
+
 Ported from the hardened vulcano-helper Host (seq-bound ARQ, generation-safe
-semantics) with the controller address 'C' and 8-hex remote IDs, and the clipboard
-replaced by constructor injection — this module never imports clipboard code.
+semantics) with prefixed controller/remote IDs and the clipboard replaced by
+constructor injection — this module never imports clipboard code.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
 """
@@ -17,18 +21,221 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import os
+import platform
 import queue
+import socket
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Protocol
-
-from cliptunnel_mcp.protocol import BROADCAST_ADDR, CONTROLLER_ADDR, Message, MsgType, pack, unpack, validate
+from cliptunnel_mcp.protocol import (
+    BROADCAST_ADDR,
+    CONTROLLER_ADDR,
+    Message,
+    MsgType,
+    generate_controller_id,
+    is_controller as is_controller_addr,
+    pack,
+    unpack,
+    validate,
+)
 from cliptunnel_mcp.transport import Transport
 
 _DEFAULT_SEQ_FILE = ".cliptunnel_controller_seq"
 
 logger = logging.getLogger("cliptunnel-controller")
+
+def _get_pkg_version() -> str:
+    """Get cliptunnel-mcp version, or 'unknown' if not installed."""
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("cliptunnel-mcp")
+    except Exception:
+        try:
+            from cliptunnel_mcp import __version__
+            return __version__
+        except Exception:
+            return "unknown"
+
+def _extract_pages(output: str, label: str) -> int:
+    """Extract page count from a vm_stat line like 'Pages free: 1234.'."""
+    import re
+    m = re.search(rf"{re.escape(label)}:\s+(\d+)", output)
+    return int(m.group(1)) if m else 0
+
+
+def _windows_mem_total() -> int:
+    """Total physical memory on Windows via GlobalMemoryStatusEx."""
+    import ctypes
+    buf = (ctypes.c_ubyte * 64)()
+    ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulong))[0] = 64
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    if kernel32.GlobalMemoryStatusEx(buf):
+        ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulonglong))
+        return ptr[1]  # offset 8
+    return 0
+
+
+def _windows_mem_available() -> int:
+    """Available physical memory on Windows via GlobalMemoryStatusEx."""
+    import ctypes
+    buf = (ctypes.c_ubyte * 64)()
+    ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulong))[0] = 64
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    if kernel32.GlobalMemoryStatusEx(buf):
+        ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulonglong))
+        return ptr[2]  # offset 16
+    return 0
+
+
+def _detect_shell_version() -> str:
+    """Detect the user's shell and its version."""
+    import shutil
+    import subprocess
+    shell = os.environ.get("SHELL", "")
+    if not shell:
+        return ""
+    try:
+        result = subprocess.run(
+            [shell, "--version"], capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout.strip().split("\n")[0] if result.stdout else ""
+    except Exception:
+        return ""
+
+
+def _detect_agent_auth() -> str:
+    """Check if the agent token file exists and is non-empty."""
+    try:
+        token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
+        if os.path.isfile(token_path):
+            with open(token_path, "r") as f:
+                return "authenticated" if f.read().strip() else "no_token"
+        return "no_token"
+    except Exception:
+        return "unknown"
+
+
+def _detect_transport_backend(transport: Transport) -> str:
+    """Get the transport backend name from the transport object."""
+    return getattr(transport, "backend_name", "unknown")
+
+
+def _get_mem_total() -> int:
+    """Total system memory in bytes."""
+    try:
+        if platform.system() == "Darwin":
+            import subprocess
+            result = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                import re
+                page_size = 4096
+                m = re.search(r"page size of (\d+) bytes", result.stdout)
+                if m:
+                    page_size = int(m.group(1))
+                free_p = _extract_pages(result.stdout, "Pages free")
+                active_p = _extract_pages(result.stdout, "Pages active")
+                inactive_p = _extract_pages(result.stdout, "Pages inactive")
+                wired_p = _extract_pages(result.stdout, "Pages wired down")
+                spec_p = _extract_pages(result.stdout, "Pages occupied by compressor")
+                total = (free_p + active_p + inactive_p + wired_p + spec_p) * page_size
+                return total
+        elif platform.system() == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        return int(line.split()[1]) * 1024
+        elif platform.system() == "Windows":
+            return _windows_mem_total()
+    except Exception:
+        pass
+    return 0
+
+
+def _get_mem_available() -> int:
+    """Available system memory in bytes (free + inactive pages on macOS)."""
+    try:
+        if platform.system() == "Darwin":
+            import subprocess
+            result = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                import re
+                page_size = 4096
+                m = re.search(r"page size of (\d+) bytes", result.stdout)
+                if m:
+                    page_size = int(m.group(1))
+                free_p = _extract_pages(result.stdout, "Pages free")
+                inactive_p = _extract_pages(result.stdout, "Pages inactive")
+                return (free_p + inactive_p) * page_size
+        elif platform.system() == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+        elif platform.system() == "Windows":
+            return _windows_mem_available()
+    except Exception:
+        pass
+    return 0
+
+
+def _get_mem_percent_used() -> float:
+    """Memory percentage used (active + wired pages / total on macOS)."""
+    try:
+        if platform.system() == "Darwin":
+            import subprocess
+            result = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                import re
+                page_size = 4096
+                m = re.search(r"page size of (\d+) bytes", result.stdout)
+                if m:
+                    page_size = int(m.group(1))
+                free_p = _extract_pages(result.stdout, "Pages free")
+                active_p = _extract_pages(result.stdout, "Pages active")
+                inactive_p = _extract_pages(result.stdout, "Pages inactive")
+                wired_p = _extract_pages(result.stdout, "Pages wired down")
+                spec_p = _extract_pages(result.stdout, "Pages occupied by compressor")
+                total_p = free_p + active_p + inactive_p + wired_p + spec_p
+                used_p = active_p + wired_p
+                if total_p > 0:
+                    return round(used_p * 100 / total_p, 1)
+        else:
+            total = _get_mem_total()
+            avail = _get_mem_available()
+            if total > 0:
+                return round((total - avail) / total * 100, 1)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _get_disk_total() -> int:
+    """Total disk space for the current directory in bytes."""
+    try:
+        import shutil
+        total, _used, _free = shutil.disk_usage(os.getcwd())
+        return total
+    except Exception:
+        return 0
+
+
+def _get_disk_free() -> int:
+    """Free disk space for the current directory in bytes."""
+    try:
+        import shutil
+        _total, _used, free = shutil.disk_usage(os.getcwd())
+        return free
+    except Exception:
+        return 0
 
 class SeqStore(Protocol):
     """Persistence for the Controller's last used command seq."""
@@ -98,6 +305,8 @@ class Controller:
         self,
         transport: Transport,
         *,
+        controller_id: str | None = None,
+        name: str | None = None,
         timeout: float = 120.0,
         retries: int = 3,
         poll_interval: float = 0.1,
@@ -107,6 +316,8 @@ class Controller:
         seq_store: SeqStore | None = None,
     ) -> None:
         self._transport = transport
+        self.controller_id = controller_id or generate_controller_id()
+        self.name = name or self.controller_id
         # Seq persistence: an injected store wins; otherwise a file-backed
         # store under the working directory unless persistence is disabled
         # (persist_seq=False or an explicit initial_seq).
@@ -135,7 +346,8 @@ class Controller:
         self._slot_condition = threading.Condition(self._slot_lock)
         self._pending_command_seq: int | None = None
         self._last_write_time = 0.0
-        self._registry: dict[str, dict] = {}  # remote_id -> {sysinfo + last_seen + status}
+        self._remotes: dict[str, dict] = {}  # remote_id -> {sysinfo + last_seen + status}
+        self._controllers: dict[str, dict] = {}  # controller_id -> {name + last_seen + status}
         self._registry_lock = threading.Lock()
         self._running = True
 
@@ -151,45 +363,111 @@ class Controller:
         self._dispatcher_thread.start()
         self._reader_thread.start()
         self._keepalive_thread.start()
-        # Broadcast register to discover existing remotes
-        self._send_broadcast_register()
+        # Self-register so we appear in our own connections list.
+        self._controllers[self.controller_id] = {
+            "self": True,
+            "name": self.name,
+            "version": 3,
+            "pid": os.getpid(),
+            # ── OS ──
+            "os": platform.system(),
+            "os_release": platform.release(),
+            "os_version": platform.version(),
+            "hostname": socket.gethostname(),
+            "arch": platform.machine(),
+            "processor": platform.processor() or "unknown",
+            # ── Python ──
+            "python_version": sys.version,
+            "python_executable": sys.executable,
+            "python_implementation": platform.python_implementation(),
+            # ── cliptunnel-mcp ──
+            "cliptunnel_mcp_version": _get_pkg_version(),
+            # ── User & environment ──
+            "user": os.environ.get("USER") or os.environ.get("USERNAME") or "unknown",
+            "cwd": os.getcwd(),
+            "shell": os.environ.get("SHELL", ""),
+            "shell_version": _detect_shell_version(),
+            "home": os.path.expanduser("~"),
+            # ── Agent auth ──
+            "agent_auth": _detect_agent_auth(),
+            # ── Transport backend ──
+            "transport_backend": _detect_transport_backend(transport),
+            # ── Hardware ──
+            "cpu_count": os.cpu_count() or 0,
+            "mem_total": _get_mem_total(),
+            "mem_available": _get_mem_available(),
+            "mem_percent_used": _get_mem_percent_used(),
+            "disk_total": _get_disk_total(),
+            "disk_free": _get_disk_free(),
+            "last_seen": time.time(),
+            "status": "alive",
+        }
+        # Announce our presence to discover existing remotes and other controllers
+        self._send_announce()
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def _send_broadcast_register(self) -> None:
-        """Broadcast a register command to discover remotes."""
+    def _send_announce(self) -> None:
+        """Broadcast an ANNOUNCE to discover remotes and other controllers."""
         self.seq += 1
         seq = self.seq
         if self._store is not None:
             self._store.save(seq)
+        announce_payload = {
+            "role": "controller",
+            "name": self.name,
+            "version": 3,
+        }
+        # Include self-registered sysinfo so other controllers see the same data.
+        with self._registry_lock:
+            self_info = dict(self._controllers.get(self.controller_id, {}))
+            self_info.pop("self", None)  # don't propagate self-flag
+            announce_payload.update(self_info)
         wire = pack(Message(
-            frm=CONTROLLER_ADDR,
+            frm=self.controller_id,
             to=BROADCAST_ADDR,
             seq=seq,
-            mtype=MsgType.COMMAND.value,
-            payload=json.dumps({"op": "register"}),
+            mtype=MsgType.ANNOUNCE.value,
+            payload=json.dumps(announce_payload),
         ))
         with self._slot_lock:
             self._paced_write(wire)
 
+
+    def discover(self) -> None:
+        """Re-broadcast ANNOUNCE to discover remotes and other controllers.
+
+        Useful when agents may have started after the initial announcement,
+        or when the clipboard was busy and the ANNOUNCE was lost.
+        """
+        self._send_announce()
+
     def _get_default_remote(self) -> str:
         """Return first alive remote ID, or broadcast if none."""
         with self._registry_lock:
-            for rid, info in self._registry.items():
+            for rid, info in self._remotes.items():
                 if info.get("status") == "alive":
                     return rid
         return BROADCAST_ADDR
 
     def get_connections(self) -> dict:
-        """Return a copy of the remote registry with last_seen_ago."""
+        """Return a dict with ``controllers`` and ``remotes`` sub-dicts.
+
+        Each entry includes ``last_seen_ago`` (seconds since last message).
+        """
         now = time.time()
         with self._registry_lock:
-            result = {}
-            for rid, info in self._registry.items():
+            controllers = {}
+            for cid, info in self._controllers.items():
                 entry = dict(info)
                 entry["last_seen_ago"] = round(now - info.get("last_seen", 0), 1)
-                result[rid] = entry
-            return result
+                controllers[cid] = entry
+            remotes = {}
+            for rid, info in self._remotes.items():
+                entry = dict(info)
+                entry["last_seen_ago"] = round(now - info.get("last_seen", 0), 1)
+                remotes[rid] = entry
+        return {"controllers": controllers, "remotes": remotes}
 
     def _keepalive_loop(self) -> None:
         """Background thread: ping idle remotes, mark dead ones.
@@ -209,7 +487,7 @@ class Controller:
                 break
             now = time.time()
             with self._registry_lock:
-                for remote_id, info in list(self._registry.items()):
+                for remote_id, info in list(self._remotes.items()):
                     last_seen = info.get("last_seen", 0)
                     idle = now - last_seen
                     status = info.get("status", "alive")
@@ -234,7 +512,7 @@ class Controller:
                         if self._store is not None:
                             self._store.save(ping_seq)
                         wire = pack(Message(
-                            frm=CONTROLLER_ADDR,
+                            frm=self.controller_id,
                             to=remote_id,
                             seq=ping_seq,
                             mtype=MsgType.PING.value,
@@ -300,7 +578,7 @@ class Controller:
                 if not self._running:
                     break
                 wire = pack(Message(
-                    frm=CONTROLLER_ADDR,
+                    frm=self.controller_id,
                     to=to,
                     seq=seq,
                     mtype=MsgType.COMMAND.value,
@@ -345,17 +623,35 @@ class Controller:
             if not raw or raw == last_raw:
                 continue
             last_raw = raw
-            if not validate(raw, CONTROLLER_ADDR):
+            if not validate(raw, self.controller_id):
                 continue
             msg = unpack(raw)
             if msg is None:
                 continue
 
-            if msg.frm != CONTROLLER_ADDR:
-                with self._registry_lock:
-                    if msg.frm in self._registry:
-                        self._registry[msg.frm]["last_seen"] = time.time()
-                        self._registry[msg.frm]["ping_sent_at"] = None
+            # Update last_seen for any known remote or controller that writes to us.
+            with self._registry_lock:
+                if msg.frm in self._remotes:
+                    self._remotes[msg.frm]["last_seen"] = time.time()
+                    self._remotes[msg.frm]["ping_sent_at"] = None
+                elif msg.frm in self._controllers:
+                    self._controllers[msg.frm]["last_seen"] = time.time()
+
+            # Process ANNOUNCE from another controller.
+            if msg.mtype == MsgType.ANNOUNCE.value:
+                if is_controller_addr(msg.frm) and msg.frm != self.controller_id:
+                    try:
+                        parsed = json.loads(msg.payload)
+                        if isinstance(parsed, dict) and parsed.get("role") == "controller":
+                            with self._registry_lock:
+                                entry = {k: v for k, v in parsed.items() if k != "role"}
+                                entry["last_seen"] = time.time()
+                                entry["status"] = "alive"
+                                self._controllers[msg.frm] = entry
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                continue
+
             if msg.mtype == MsgType.ACK.value:
                 with self._slot_condition:
                     if self._pending_command_seq == msg.seq:
@@ -367,7 +663,6 @@ class Controller:
                 # filter — they are unsolicited, not replies to a command.
                 is_registration = (
                     msg.mtype == MsgType.RESPONSE.value
-                    and msg.frm != CONTROLLER_ADDR
                     and msg.seq == 0
                 )
                 if not is_registration:
@@ -381,12 +676,12 @@ class Controller:
                         self._pending_command_seq = None
                         self._slot_condition.notify_all()
                 # Check for registration response (payload with "os" field).
-                if msg.mtype == MsgType.RESPONSE.value and msg.frm != CONTROLLER_ADDR:
+                if msg.mtype == MsgType.RESPONSE.value:
                     try:
                         parsed = json.loads(msg.payload)
                         if isinstance(parsed, dict) and "os" in parsed:
                             with self._registry_lock:
-                                self._registry[msg.frm] = {
+                                self._remotes[msg.frm] = {
                                     **parsed,
                                     "last_seen": time.time(),
                                     "status": "alive",
@@ -395,7 +690,7 @@ class Controller:
                         pass
                 # ACK the response back so the remote stops retransmitting.
                 self._paced_write(pack(Message(
-                    frm=CONTROLLER_ADDR,
+                    frm=self.controller_id,
                     to=msg.frm,
                     seq=msg.seq,
                     mtype=MsgType.ACK.value,
@@ -408,6 +703,32 @@ class Controller:
                         future.set_result(None)
                     else:
                         future.set_result(msg.payload)
+                # The ACK-back above ended the exchange — the slot is free,
+                # so hand the clipboard back to the user.
+                self._maybe_restore_user_clipboard()
+
+    def _maybe_restore_user_clipboard(self) -> None:
+        """Restore the user's clipboard after an exchange, if still intact.
+
+        The Controller is the last writer in every exchange; once its final
+        ACK is out, the slot belongs to the user again. The transport's own
+        guard declines (returns False) when another writer intervened, which
+        is a silent no-op here. The restore write respects the same pacing
+        gap as every other slot write.
+        """
+        restore = getattr(self._transport, "restore_user_clipboard", None)
+        if not callable(restore):
+            return
+        with self._slot_lock:
+            self._pace_write_gap()
+            try:
+                restored = restore()
+            except Exception:
+                logger.debug("user clipboard restore failed", exc_info=True)
+                return
+            self._last_write_time = time.monotonic()
+        if restored:
+            logger.info("user clipboard restored after exchange")
 
     # ── Slot access ──────────────────────────────────────────────────
 
@@ -418,10 +739,14 @@ class Controller:
         message before it is overwritten.
         """
         with self._slot_lock:
-            now = time.monotonic()
-            gap = self.poll_interval * 2
-            elapsed = now - self._last_write_time
-            if elapsed < gap:
-                time.sleep(gap - elapsed)
+            self._pace_write_gap()
             self._transport.write(wire)
             self._last_write_time = time.monotonic()
+
+    def _pace_write_gap(self) -> None:
+        """Sleep out the bounded inter-write gap (caller holds the slot lock)."""
+        now = time.monotonic()
+        gap = self.poll_interval * 2
+        elapsed = now - self._last_write_time
+        if elapsed < gap:
+            time.sleep(gap - elapsed)

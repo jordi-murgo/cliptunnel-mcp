@@ -45,6 +45,7 @@ EXPECTED_TOOLS = {
     "remote_download",
     "remote_sysinfo",
     "remote_connections",
+    "remote_discovery",
     "remote_agent_login",
     "remote_agent_login_status",
     "remote_agent_models",
@@ -86,11 +87,17 @@ class TestServerModuleLaziness(unittest.TestCase):
 
     def test_import_does_not_pull_mcp(self):
         src_dir = str(Path(__file__).resolve().parent.parent / "src")
+        # The core package (protocol, controller, __init__) must not pull mcp.
+        # server.py itself imports Context from mcp for type annotations —
+        # that's expected and acceptable for the server-only module.
         probe = (
-            "import sys; import cliptunnel_mcp.server as s; "
-            "assert 'mcp' not in sys.modules, 'server import pulled mcp'; "
-            "assert callable(s.create_server) and callable(s.main); "
-            "import cliptunnel_mcp; assert callable(cliptunnel_mcp.dispatch)"
+            "import sys; "
+            "import cliptunnel_mcp; "
+            "import cliptunnel_mcp.protocol; "
+            "import cliptunnel_mcp.controller; "
+            "assert 'mcp' not in sys.modules, 'core package pulled mcp'; "
+            "assert callable(cliptunnel_mcp.dispatch); "
+            "assert callable(cliptunnel_mcp.pack)"
         )
         proc = subprocess.run(
             [sys.executable, "-c", probe],
@@ -123,6 +130,7 @@ class ServerTestCase(unittest.TestCase):
             poll_interval=0.001,
             initial_seq=0,
             persist_seq=False,
+            controller_id="C1a2b3c4",
         )
         server.set_controller(self.controller)
         self.mcp = server.create_server()
@@ -299,27 +307,31 @@ class TestRemoteConnections(ServerTestCase):
         result = self.call("remote_connections")
         data = json.loads(result)
         self.assertIsInstance(data, dict)
+        self.assertIn("controllers", data)
+        self.assertIn("remotes", data)
 
     def test_remote_connections_without_controller_returns_empty(self):
-        """When no controller is configured, remote_connections returns {}."""
+        """When no controller is configured, remote_connections returns
+        {'controllers': {}, 'remotes': {}}."""
         self.server.reset()
         result = self.call("remote_connections")
-        self.assertEqual(json.loads(result), {})
+        self.assertEqual(json.loads(result), {"controllers": {}, "remotes": {}})
 
     def test_remote_connections_populated_after_registration(self):
-        """After the Agent registers (broadcast register → delayed response),
-        remote_connections should show the agent's remote_id with sysinfo."""
+        """After the Agent registers (ANNOUNCE → delayed response),
+        remote_connections should show the agent's remote_id in remotes
+        with sysinfo."""
         # Wait up to 5s for the registration to arrive (random delay 0.1–4.0s).
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             result = self.call("remote_connections")
             data = json.loads(result)
-            if self.agent.remote_id in data:
+            if self.agent.remote_id in data.get("remotes", {}):
                 break
             time.sleep(0.1)
         data = json.loads(self.call("remote_connections"))
-        self.assertIn(self.agent.remote_id, data)
-        info = data[self.agent.remote_id]
+        self.assertIn(self.agent.remote_id, data["remotes"])
+        info = data["remotes"][self.agent.remote_id]
         self.assertIn("os", info)
         self.assertEqual(info.get("status"), "alive")
 
