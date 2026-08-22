@@ -1,13 +1,18 @@
 """Agent endpoint behavior over a deterministic slot transport.
 
-Adapted to the CT2 protocol: the Agent generates a random 8-hex remote_id,
-uses it in the frm field, and handles PING and broadcast register commands.
+Adapted to the CT3 protocol: the Agent generates a random R+7hex remote_id,
+uses it in the frm field, and handles PING, ANNOUNCE from controllers, and
+broadcast register commands (legacy compat).
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 import unittest
+from unittest import mock
+
 
 from cliptunnel_mcp import Agent
 from cliptunnel_mcp.protocol import (
@@ -21,6 +26,8 @@ from cliptunnel_mcp.protocol import (
 from tests.clipboard_slot import ClipboardSlot
 
 WORKER_PREFIX = "cliptunnel-agent-worker"
+
+TEST_CONTROLLER_ID = "C1a2b3c4"
 
 
 def wire(frm: str, to: str, seq: int, kind: MsgType, payload: str = "") -> str:
@@ -67,7 +74,7 @@ class AgentTestCase(unittest.TestCase):
 
     def deliver_command(self, agent: Agent, seq: int, payload: str = "work") -> None:
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, agent.remote_id, seq, MsgType.COMMAND, payload)
+            wire(TEST_CONTROLLER_ID, agent.remote_id, seq, MsgType.COMMAND, payload)
         )
 
 
@@ -75,7 +82,8 @@ class TestAgentConstruction(AgentTestCase):
     def test_constructor_generates_remote_id(self):
         agent = self.make_agent()
         self.assertEqual(len(agent.remote_id), 8)
-        self.assertTrue(all(c in "0123456789abcdef" for c in agent.remote_id))
+        self.assertTrue(agent.remote_id.startswith("R"))
+        self.assertTrue(all(c in "0123456789abcdef" for c in agent.remote_id[1:]))
 
     def test_constructor_with_injected_slot_writes_nothing(self):
         self.make_agent()
@@ -115,7 +123,7 @@ class TestAgentCommandHandling(AgentTestCase):
         message = unpack(value)
         assert message is not None
         self.assertEqual(message.frm, agent.remote_id)
-        self.assertEqual(message.to, CONTROLLER_ADDR)
+        self.assertEqual(message.to, TEST_CONTROLLER_ID)
         self.assertEqual(message.payload, "result:job")
 
     def test_error_result_written_as_error(self):
@@ -163,7 +171,7 @@ class TestAgentWorkerPool(AgentTestCase):
         first_seq = unpack(first_value).seq
         second_seq = 2 if first_seq == 1 else 1
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, agent.remote_id, first_seq, MsgType.ACK)
+            wire(TEST_CONTROLLER_ID, agent.remote_id, first_seq, MsgType.ACK)
         )
         self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, second_seq),
@@ -192,7 +200,7 @@ class TestAgentResponseCache(AgentTestCase):
             lambda value: is_message(value, MsgType.RESPONSE, 1)
         )
         self.assertEqual(calls, ["work"])
-        self.slot.overwrite(wire(CONTROLLER_ADDR, agent.remote_id, 1, MsgType.ACK))
+        self.slot.overwrite(wire(TEST_CONTROLLER_ID, agent.remote_id, 1, MsgType.ACK))
         self.deliver_command(agent, 1, "work")
         _, replayed = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 1), after=first
@@ -235,7 +243,7 @@ class TestAgentPing(AgentTestCase):
         no response generated."""
         agent = self.make_agent()
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, agent.remote_id, 10, MsgType.PING)
+            wire(TEST_CONTROLLER_ID, agent.remote_id, 10, MsgType.PING)
         )
         _, ack = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ACK, 10)
@@ -243,13 +251,13 @@ class TestAgentPing(AgentTestCase):
         msg = unpack(ack)
         assert msg is not None
         self.assertEqual(msg.frm, agent.remote_id)
-        self.assertEqual(msg.to, CONTROLLER_ADDR)
+        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
 
     def test_ping_does_not_generate_response(self):
         """A PING produces only an ACK — no RESPONSE or ERROR follows."""
         agent = self.make_agent()
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, agent.remote_id, 20, MsgType.PING)
+            wire(TEST_CONTROLLER_ID, agent.remote_id, 20, MsgType.PING)
         )
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 20))
         # No response should appear within a short window
@@ -263,9 +271,9 @@ class TestAgentMessageRouting(AgentTestCase):
     def test_message_addressed_to_different_remote_is_ignored(self):
         """A message with to=different_hex_id is ignored by this agent."""
         self.make_agent()
-        other_id = "cafef00d"
+        other_id = "Rcafef00"
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, other_id, 1, MsgType.COMMAND, "not for me")
+            wire(TEST_CONTROLLER_ID, other_id, 1, MsgType.COMMAND, "not for me")
         )
         with self.assertRaises(AssertionError):
             self.slot.wait_for_write(
@@ -273,11 +281,11 @@ class TestAgentMessageRouting(AgentTestCase):
             )
 
     def test_message_addressed_to_controller_is_ignored(self):
-        """A message addressed to C is ignored by the agent (it's for the
-        controller, not for us)."""
+        """A message addressed to a controller ID is ignored by the agent (it's
+        for the controller, not for us)."""
         self.make_agent()
         self.slot.overwrite(
-            wire("cafef00d", CONTROLLER_ADDR, 1, MsgType.RESPONSE, "not for me")
+            wire("Rcafef00", TEST_CONTROLLER_ID, 1, MsgType.RESPONSE, "not for me")
         )
         with self.assertRaises(AssertionError):
             self.slot.wait_for_write(
@@ -285,16 +293,56 @@ class TestAgentMessageRouting(AgentTestCase):
             )
 
 
-class TestAgentBroadcastRegister(AgentTestCase):
-    def test_broadcast_register_triggers_delayed_registration(self):
-        """A broadcast register command causes the Agent to schedule a delayed
+class TestAgentAnnounce(AgentTestCase):
+    def test_announce_triggers_delayed_registration(self):
+        """An ANNOUNCE from a controller causes the Agent to schedule a delayed
         registration response (a RESPONSE with sysinfo payload) to the
         controller."""
         import json
 
         agent = self.make_agent()
+        # Deliver an ANNOUNCE from a controller
         self.slot.overwrite(
-            wire(CONTROLLER_ADDR, BROADCAST_ADDR, 50, MsgType.COMMAND,
+            wire(TEST_CONTROLLER_ID, BROADCAST_ADDR, 50, MsgType.ANNOUNCE,
+                 json.dumps({"role": "controller", "name": "test", "version": 3}))
+        )
+        # The registration response arrives after a random delay (0.1–4.0s).
+        # Wait up to 5s for a RESPONSE from the agent.
+        _, reg = self.slot.wait_for_write(
+            lambda value: is_message(value, MsgType.RESPONSE, 0), timeout=5.0
+        )
+        msg = unpack(reg)
+        assert msg is not None
+        self.assertEqual(msg.frm, agent.remote_id)
+        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
+        # The payload should be sysinfo JSON with an "os" field.
+        payload = json.loads(msg.payload)
+        self.assertIn("os", payload)
+
+    def test_announce_does_not_send_ack(self):
+        """An ANNOUNCE does NOT produce an ACK — only the delayed registration
+        response."""
+        agent = self.make_agent()
+        import json
+
+        self.slot.overwrite(
+            wire(TEST_CONTROLLER_ID, BROADCAST_ADDR, 60, MsgType.ANNOUNCE,
+                 json.dumps({"role": "controller", "name": "test", "version": 3}))
+        )
+        # No ACK should appear within a short window
+        with self.assertRaises(AssertionError):
+            self.slot.wait_for_write(
+                lambda value: is_message(value, MsgType.ACK, 60), timeout=0.05
+            )
+
+    def test_broadcast_register_triggers_delayed_registration(self):
+        """A legacy broadcast register command also causes the Agent to schedule
+        a delayed registration response (backward compat)."""
+        import json
+
+        agent = self.make_agent()
+        self.slot.overwrite(
+            wire(TEST_CONTROLLER_ID, BROADCAST_ADDR, 70, MsgType.COMMAND,
                  json.dumps({"op": "register"}))
         )
         # The registration response arrives after a random delay (0.1–4.0s).
@@ -305,26 +353,113 @@ class TestAgentBroadcastRegister(AgentTestCase):
         msg = unpack(reg)
         assert msg is not None
         self.assertEqual(msg.frm, agent.remote_id)
-        self.assertEqual(msg.to, CONTROLLER_ADDR)
-        # The payload should be sysinfo JSON with an "os" field.
+        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
         payload = json.loads(msg.payload)
         self.assertIn("os", payload)
 
-    def test_broadcast_register_does_not_send_ack(self):
-        """A broadcast register command does NOT produce an ACK — only the
-        delayed registration response."""
-        agent = self.make_agent()
-        import json
 
-        self.slot.overwrite(
-            wire(CONTROLLER_ADDR, BROADCAST_ADDR, 60, MsgType.COMMAND,
-                 json.dumps({"op": "register"}))
-        )
-        # No ACK should appear within a short window
-        with self.assertRaises(AssertionError):
-            self.slot.wait_for_write(
-                lambda value: is_message(value, MsgType.ACK, 60), timeout=0.05
+class TestAgentHeartbeat(AgentTestCase):
+    def make_heartbeat_agent(self, **overrides) -> Agent:
+        """Agent whose heartbeat jitter is pinned to zero (deterministic timing)."""
+        patcher = mock.patch("cliptunnel_mcp.agent._HEARTBEAT_JITTER_SECS", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return self.make_agent(**overrides)
+
+    def test_default_heartbeat_interval_is_120_seconds(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CLIPTUNNEL_HEARTBEAT_SECS", None)
+            agent = self.make_agent()
+        self.assertEqual(agent.heartbeat_secs, 120.0)
+
+    def test_heartbeat_env_var_overrides_interval(self):
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_HEARTBEAT_SECS": "0.05"}):
+            agent = self.make_agent()
+        self.assertEqual(agent.heartbeat_secs, 0.05)
+
+    def test_heartbeat_env_var_accepts_float_values(self):
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_HEARTBEAT_SECS": "1.5"}):
+            agent = self.make_agent()
+        self.assertEqual(agent.heartbeat_secs, 1.5)
+
+    def test_non_positive_heartbeat_interval_disables_thread(self):
+        agent = self.make_agent(heartbeat_secs=0)
+        self.assertLessEqual(agent.heartbeat_secs, 0)
+        self.assertIsNone(agent._heartbeat_thread)
+
+    def test_non_positive_env_var_disables_thread(self):
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_HEARTBEAT_SECS": "-1"}):
+            agent = self.make_agent()
+        self.assertIsNone(agent._heartbeat_thread)
+
+    def test_heartbeat_sends_registrations_to_each_known_controller(self):
+        agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
+        agent._known_controllers.update({TEST_CONTROLLER_ID, "C0ff3e55"})
+        for cid in (TEST_CONTROLLER_ID, "C0ff3e55"):
+            _, value = self.slot.wait_for_write(
+                lambda v, c=cid: is_message(v, MsgType.RESPONSE, 0) and unpack(v).to == c,
+                timeout=5.0,
             )
+            msg = unpack(value)
+            assert msg is not None
+            self.assertEqual(msg.frm, agent.remote_id)
+            payload = json.loads(msg.payload)
+            self.assertIn("os", payload)
+
+    def test_heartbeat_repeats_registrations_periodically(self):
+        agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
+        agent._known_controllers.add(TEST_CONTROLLER_ID)
+        def count_registrations() -> int:
+            return sum(
+                1
+                for w in self.slot._writes
+                if is_message(w, MsgType.RESPONSE, 0) and unpack(w).to == TEST_CONTROLLER_ID
+            )
+
+        self.assertTrue(
+            wait_until(lambda: count_registrations() >= 3, timeout=5.0),
+            "expected at least 3 periodic heartbeat registrations",
+        )
+
+    def test_heartbeat_skips_cycles_when_no_controllers_known(self):
+        agent = self.make_heartbeat_agent(heartbeat_secs=0.02)
+        current = self.slot.revision
+        self.assertEqual(
+            self.slot.wait_for_revision(after=current, timeout=0.2),
+            current,
+            "heartbeat must stay silent while no controller is known",
+        )
+
+    def test_heartbeat_thread_stops_on_close(self):
+        agent = self.make_heartbeat_agent(heartbeat_secs=30.0)
+        thread = agent._heartbeat_thread
+        assert thread is not None
+        self.assertTrue(thread.is_alive())
+        agent.close()
+        self.assertFalse(thread.is_alive())
+
+    def test_heartbeat_survives_a_failing_registration_cycle(self):
+        agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
+        agent._known_controllers.add(TEST_CONTROLLER_ID)
+        original = agent.send_registration
+        calls = {"n": 0}
+
+        def flaky(controller_id=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient clipboard failure")
+            return original(controller_id=controller_id)
+
+        with mock.patch.object(agent, "send_registration", side_effect=flaky):
+            self.assertTrue(
+                wait_until(lambda: calls["n"] >= 2, timeout=5.0),
+                "heartbeat thread must keep cycling after a failed registration",
+            )
+        self.slot.wait_for_write(
+            lambda v: is_message(v, MsgType.RESPONSE, 0)
+            and unpack(v).to == TEST_CONTROLLER_ID,
+            timeout=5.0,
+        )
 
 
 if __name__ == "__main__":

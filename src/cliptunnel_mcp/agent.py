@@ -1,20 +1,27 @@
-"""Agent endpoint of the ClipTunnel CT2 protocol.
+"""Agent endpoint of the ClipTunnel CT3 protocol.
 
 Runs on the locked-down remote machine. Watches an injected slot-compatible
 :class:`~cliptunnel_mcp.transport.Transport` for commands, ACKs them
 immediately, processes them in a worker pool, and writes one typed response
 at a time — retransmitting it byte-identically until its exact ACK arrives.
 
-Each agent generates a random 8-hex remote ID and responds only to messages
-addressed to that ID or to the broadcast address. On startup and on broadcast
-register commands it sends a registration response with sysinfo.
+CT3: each agent generates a random R+7hex remote ID and responds only to
+messages addressed to that ID or to the broadcast address. When a
+controller announces via ANNOUNCE, the agent registers the controller
+and sends a registration response with sysinfo directed to that controller.
+Responses and ACKs are routed to the specific controller ID, not a fixed
+address.
 
 Zero external dependencies — stdlib only.  Python 3.10 compatible.
 """
+
 import logging
 
 import concurrent.futures
+import json
+import os
 import queue
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -26,6 +33,7 @@ from cliptunnel_mcp.protocol import (
     MsgType,
     SeqTracker,
     generate_remote_id,
+    is_controller as is_controller_addr,
     pack,
     unpack,
     validate,
@@ -34,6 +42,33 @@ from cliptunnel_mcp.transport import Transport
 
 
 logger = logging.getLogger("cliptunnel-agent")
+
+# Agent heartbeat: periodically re-register with every known controller so
+# registrations (and their sysinfo) survive controller restarts.
+HEARTBEAT_ENV_VAR = "CLIPTUNNEL_HEARTBEAT_SECS"
+DEFAULT_HEARTBEAT_SECS = 120.0
+_HEARTBEAT_JITTER_SECS = 15.0
+
+
+def _resolve_heartbeat_secs(explicit: float | None) -> float:
+    """Resolve the heartbeat interval: explicit arg, then env var, then default.
+
+    A malformed env value falls back to the default. Values <= 0 disable the
+    heartbeat entirely.
+    """
+    if explicit is not None:
+        return float(explicit)
+    raw = os.environ.get(HEARTBEAT_ENV_VAR, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning(
+                "ignoring malformed %s=%r — using default %.0fs",
+                HEARTBEAT_ENV_VAR, raw, DEFAULT_HEARTBEAT_SECS,
+            )
+    return DEFAULT_HEARTBEAT_SECS
+
 
 Handler = Callable[[str], tuple[str, bool]]
 
@@ -91,6 +126,7 @@ class Agent:
         poll_interval: float = 0.1,
         max_workers: int = 5,
         response_ack_timeout: float = 1.0,
+        heartbeat_secs: float | None = None,
     ) -> None:
         self.remote_id = generate_remote_id()
         self.tracker = SeqTracker()
@@ -103,11 +139,16 @@ class Agent:
         self._slot_lock = threading.RLock()
         self._response_condition = threading.Condition(self._slot_lock)
         self._pending_response: tuple[int, str] | None = None
-        self._response_queue: queue.Queue[tuple[int, str, bool]] = queue.Queue()
+        self._response_queue: queue.Queue[tuple[int, str, bool, str]] = queue.Queue()
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="cliptunnel-agent-worker",
         )
+        # Known controller IDs — the agent routes responses to the
+        # specific controller that sent the command or announced itself.
+        self._known_controllers: set[str] = set()
+        # Transport backend name for sysinfo reporting.
+        self._transport_backend = getattr(transport, "backend_name", None)
         self._dispatcher_thread = threading.Thread(
             target=self._response_dispatcher,
             name="cliptunnel-agent-responder",
@@ -116,8 +157,20 @@ class Agent:
         self._reader_thread = threading.Thread(
             target=self._reader, name="cliptunnel-agent-reader", daemon=True
         )
+        # Heartbeat: periodic re-registration with every known controller.
+        # A non-positive interval disables the heartbeat entirely.
+        self.heartbeat_secs = _resolve_heartbeat_secs(heartbeat_secs)
+        self._heartbeat_thread: threading.Thread | None = None
+        if self.heartbeat_secs > 0:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="cliptunnel-agent-heartbeat",
+                daemon=True,
+            )
         self._dispatcher_thread.start()
         self._reader_thread.start()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.start()
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -128,35 +181,47 @@ class Agent:
                 return
             self._running = False
             self._response_condition.notify_all()
-        self._response_queue.put((-1, "", False))
+        self._response_queue.put((-1, "", False, ""))
         self._dispatcher_thread.join(timeout=2.0)
         self._reader_thread.join(timeout=2.0)
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2.0)
         self._pool.shutdown(wait=False, cancel_futures=True)
 
-    def send_registration(self) -> None:
-        """Send a registration response with current sysinfo to the controller."""
-        import json
-        from cliptunnel_mcp.operations import dispatch
-        sysinfo_result, _ = dispatch(json.dumps({"op": "sysinfo"}))
-        wire = pack(Message(
-            frm=self.remote_id,
-            to=CONTROLLER_ADDR,
-            seq=0,
-            mtype=MsgType.RESPONSE.value,
-            payload=sysinfo_result,
-        ))
-        self._write_slot_safe(wire)
-        logger.info("registration sent (remote_id=%s)", self.remote_id)
+    def send_registration(self, controller_id: str | None = None) -> None:
+        """Send a registration response with current sysinfo to a controller.
 
-    def _schedule_registration(self, delay: float | None = None) -> None:
+        If *controller_id* is None, sends to all known controllers (or
+        falls back to the legacy ``CONTROLLER_ADDR`` if none are known).
+        """
+        from cliptunnel_mcp.operations import dispatch
+        req = {"op": "sysinfo"}
+        if self._transport_backend:
+            req["_transport_backend"] = self._transport_backend
+        sysinfo_result, _ = dispatch(json.dumps(req))
+        targets = self._known_controllers if controller_id is None else {controller_id}
+        if not targets:
+            # Fallback: send to legacy C address (backward compat).
+            targets = {CONTROLLER_ADDR}
+        for cid in targets:
+            wire = pack(Message(
+                frm=self.remote_id,
+                to=cid,
+                seq=0,
+                mtype=MsgType.RESPONSE.value,
+                payload=sysinfo_result,
+            ))
+            self._write_slot_safe(wire)
+            logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
+
+    def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
-        import random
         d = delay if delay is not None else random.uniform(0.1, 4.0)
         logger.info("scheduling registration in %.1fs (remote_id=%s)", d, self.remote_id)
         def _delayed() -> None:
             time.sleep(d)
             if self._running:
-                self.send_registration()
+                self.send_registration(controller_id=controller_id)
         threading.Thread(target=_delayed, daemon=True, name="cliptunnel-register").start()
 
     # ── Background threads ───────────────────────────────────────────
@@ -170,6 +235,47 @@ class Agent:
                 break
             revision = _slot_revision(self._transport)
             self._tick()
+
+
+    def _sleep_while_running(self, seconds: float) -> bool:
+        """Bounded stoppable sleep; False when the agent stopped mid-wait."""
+        deadline = time.monotonic() + seconds
+        while self._running:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(remaining, 0.5))
+        return False
+
+    def _heartbeat_loop(self) -> None:
+        """Heartbeat thread: periodically re-register with known controllers.
+
+        Each cycle waits ``heartbeat_secs`` plus random jitter (0-15s) so
+        multiple agents sharing a clipboard never synchronize their writes,
+        then sends a registration (sysinfo RESPONSE seq=0) to every known
+        controller through the regular registration path. Cycles are
+        skipped silently while no controller is known.
+        """
+        while self._running:
+            delay = self.heartbeat_secs + random.uniform(0.0, _HEARTBEAT_JITTER_SECS)
+            if not self._sleep_while_running(delay):
+                break
+            if not self._running:
+                break
+            for cid in sorted(self._known_controllers):
+                if not self._running:
+                    break
+                logger.debug(
+                    "heartbeat registration to %s (remote_id=%s)", cid, self.remote_id
+                )
+                try:
+                    self.send_registration(controller_id=cid)
+                except Exception:
+                    logger.warning(
+                        "heartbeat registration to %s failed — retrying next cycle",
+                        cid, exc_info=True,
+                    )
+
 
     def _tick(self) -> None:
         raw = self._transport.read()
@@ -195,12 +301,23 @@ class Agent:
             self._last_raw = raw
             return
 
+        # Process ANNOUNCE from a controller — register and respond with sysinfo.
+        if msg.mtype == MsgType.ANNOUNCE.value:
+            if is_controller_addr(msg.frm):
+                logger.info("ANNOUNCE from controller %s — registering", msg.frm)
+                self._known_controllers.add(msg.frm)
+                self._last_raw = raw
+                self._schedule_registration(controller_id=msg.frm)
+            else:
+                self._last_raw = raw
+            return
+
         # Respond to ping immediately with an ACK — no processing.
         if msg.mtype == MsgType.PING.value:
             logger.info("ping recv seq=%d — sending ACK", msg.seq)
             self._write_slot_safe(pack(Message(
                 frm=self.remote_id,
-                to=CONTROLLER_ADDR,
+                to=msg.frm,
                 seq=msg.seq,
                 mtype=MsgType.ACK.value,
                 payload="",
@@ -226,26 +343,32 @@ class Agent:
             self._last_raw = raw
             return
 
-        # Broadcast register: schedule a delayed registration response, no ACK.
+        # Broadcast register (legacy compat): schedule a delayed registration.
         if msg.to == BROADCAST_ADDR:
             try:
-                import json as _json
-                req = _json.loads(msg.payload) if msg.payload else {}
+                req = json.loads(msg.payload) if msg.payload else {}
             except Exception:
                 req = {}
             if isinstance(req, dict) and req.get("op") == "register":
                 logger.info("broadcast register received — scheduling registration")
+                # If the sender is a controller, register it.
+                if is_controller_addr(msg.frm):
+                    self._known_controllers.add(msg.frm)
                 self._last_raw = raw
-                self._schedule_registration()
+                self._schedule_registration(controller_id=msg.frm if is_controller_addr(msg.frm) else None)
                 return
             # Other broadcast commands: fall through to normal ACK + process.
+
+        # Register the controller that sent this command.
+        if is_controller_addr(msg.frm):
+            self._known_controllers.add(msg.frm)
 
         # ACK immediately — frees the slot for the Controller.
         logger.info("recv cmd seq=%d payload=%s", msg.seq, _truncate(msg.payload))
         logger.debug("acking seq=%d", msg.seq)
         self._write_slot_safe(pack(Message(
             frm=self.remote_id,
-            to=CONTROLLER_ADDR,
+            to=msg.frm,
             seq=msg.seq,
             mtype=MsgType.ACK.value,
             payload="",
@@ -264,7 +387,7 @@ class Agent:
                         )
                     if not already_pending:
                         payload, is_error = cached
-                        self._response_queue.put((msg.seq, payload, is_error))
+                        self._response_queue.put((msg.seq, payload, is_error, msg.frm))
             return
 
         self.tracker.mark_processing(msg.seq)
@@ -283,13 +406,13 @@ class Agent:
             "done seq=%d %s output=%s",
             msg.seq, "ERROR" if is_error else "OK", _truncate(output),
         )
-        self._response_queue.put((msg.seq, output, is_error))
+        self._response_queue.put((msg.seq, output, is_error, msg.frm))
 
     def _response_dispatcher(self) -> None:
         """Send one response envelope until its exact ACK arrives."""
         while self._running:
             try:
-                seq, payload, is_error = self._response_queue.get(timeout=0.5)
+                seq, payload, is_error, target = self._response_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if not self._running or seq == -1:
@@ -300,7 +423,7 @@ class Agent:
             mtype = MsgType.ERROR.value if is_error else MsgType.RESPONSE.value
             wire = pack(Message(
                 frm=self.remote_id,
-                to=CONTROLLER_ADDR,
+                to=target,
                 seq=seq,
                 mtype=mtype,
                 payload=payload,

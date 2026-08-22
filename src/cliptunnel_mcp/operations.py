@@ -332,16 +332,22 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
     # ── Shell version ───────────────────────────────────────────────
     info["shell_version"] = _detect_shell_version()
 
-    # ── Clipboard backend ──────────────────────────────────────────
-    try:
-        from clipboard_event import Clipboard
-        _clip = Clipboard()
-        info["clipboard_backend"] = _clip.backend_name
-        _clip.close()
-    except ImportError:
-        info["clipboard_backend"] = "not_installed"
-    except Exception:
-        info["clipboard_backend"] = "unknown"
+    # ── Transport backend ───────────────────────────────────────────
+    # The transport backend is injected by the Agent via req["_transport_backend"].
+    # When not present (e.g. direct dispatch), detect from clipboard_event.
+    transport_backend = req.get("_transport_backend")
+    if transport_backend:
+        info["transport_backend"] = transport_backend
+    else:
+        try:
+            from clipboard_event import Clipboard
+            _clip = Clipboard()
+            info["transport_backend"] = f"clipboard.{_clip.backend_name}"
+            _clip.close()
+        except ImportError:
+            info["transport_backend"] = "clipboard.not_installed"
+        except Exception:
+            info["transport_backend"] = "unknown"
 
     # ── CPU ─────────────────────────────────────────────────────────
     info["cpu_count"] = os.cpu_count() or 0

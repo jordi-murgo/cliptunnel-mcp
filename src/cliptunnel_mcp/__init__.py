@@ -8,7 +8,11 @@ from cliptunnel_mcp.protocol import (
     Message,
     MsgType,
     SeqTracker,
+    generate_controller_id,
     generate_remote_id,
+    is_broadcast,
+    is_controller,
+    is_remote,
     is_valid_from_address,
     is_valid_to_address,
     pack,
@@ -17,7 +21,7 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.operations import dispatch
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "BROADCAST_ADDR",
@@ -29,9 +33,14 @@ __all__ = [
     "PROTOCOL_VERSION",
     "SeqTracker",
     "dispatch",
+    "generate_controller_id",
     "generate_remote_id",
+    "is_broadcast",
+    "is_controller",
+    "is_remote",
     "is_valid_from_address",
     "is_valid_to_address",
+    "pack",
     "unpack",
     "validate",
 ]
@@ -44,4 +53,3 @@ def __getattr__(name: str):
 
         return Agent
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
