@@ -39,6 +39,9 @@ cliptunnel-agent = "cliptunnel_mcp.agent:main"
 
 [project.optional-dependencies]
 server = ["mcp>=1.2,<2"]
+https = ["cryptography>=42"]
+repeater = []
+
 
 [project.urls]
 Homepage = "https://github.com/jordi-murgo/cliptunnel-mcp"

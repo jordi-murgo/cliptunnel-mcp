@@ -488,10 +488,10 @@ def main() -> None:
     )
     logger = logging.getLogger("cliptunnel-agent")
 
-    from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+    from cliptunnel_mcp.transport_factory import build_transport
     from cliptunnel_mcp.operations import dispatch as handler
-    transport = ClipboardTransport()
-    logger.info("starting agent on local OS clipboard")
+    transport = build_transport()
+    logger.info("starting agent on %s transport", transport.backend_name)
     agent = Agent(transport, handler)
     logger.info("agent running — remote_id=%s — press Ctrl+C to stop", agent.remote_id)
 
