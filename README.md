@@ -1,19 +1,19 @@
 # cliptunnel-mcp
 
-Operate locked-down remote machines through their clipboard — now with multi-remote support and autonomous agents.
+Operate locked-down remote machines through their clipboard — now with multi-remote support, autonomous agents, clipboard preservation, and agent heartbeat.
 
 ## What it does
 
 `cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-**v0.5.0** introduces CT2 protocol v2 with multi-remote support, autonomous Copilot agents, and clipboard-event integration.
+**v0.7.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, and clipboard preservation that restores the user's clipboard after every exchange.
 
 The package ships four layers:
 
-- **Protocol** — CT2 wire format with 8-char hex remote IDs, broadcast routing, keepalive pings, and typed messages (command, response, error, ack, ping).
-- **Endpoints** — `Controller` (operator side) with a remote registry, and multiple `Agent` instances (remote side), each with a unique hex ID. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
-- **MCP server** — a FastMCP application with 25 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, and connection discovery.
-- **Clipboard transport** — backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform event-driven change detection.
+- **Protocol** — CT3 wire format with prefixed endpoint IDs (`C`/`R` + 7 hex), broadcast routing, keepalive pings, announce-based discovery, and typed messages (command, response, error, ack, ping, announce).
+- **Endpoints** — `Controller` (operator side) with a remote + controller registry, and multiple `Agent` instances (remote side), each with a unique prefixed ID. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
+- **MCP server** — a FastMCP application with 26 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, connection listing, and announce-based discovery.
+- **Clipboard transport** — backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform event-driven change detection, with user-clipboard preservation (non-protocol content is backed up and restored after each exchange).
 
 ## Architecture
 
@@ -22,13 +22,13 @@ graph LR
     subgraph Operator["Operator machine"]
         Client["MCP Client<br/>(Claude, Pi, Cursor)"]
         Server["MCP Server<br/>(FastMCP)"]
-        Controller["Controller<br/>· registry<br/>· keepalive<br/>· broadcast"]
+        Controller["Controller<br/>· remote + controller registry<br/>· keepalive<br/>· announce<br/>· clipboard restore"]
         Client -- "MCP / stdio" --> Server
         Server --> Controller
     end
 
     subgraph Remote1["Remote machine A"]
-        Agent1["Agent<br/>remote_id: a1b2c3d4"]
+        Agent1["Agent<br/>remote_id: R1b2c3d4<br/>· heartbeat"]
         Ops1["operations<br/>dispatch"]
         Copilot1["copilot_client<br/>agent_session"]
         Agent1 --> Ops1
@@ -36,33 +36,33 @@ graph LR
     end
 
     subgraph Remote2["Remote machine B"]
-        Agent2["Agent<br/>remote_id: e5f6a7b8"]
+        Agent2["Agent<br/>remote_id: R5f6a7b8<br/>· heartbeat"]
         Ops2["operations<br/>dispatch"]
         Agent2 --> Ops2
     end
 
-    Controller -- "CT2 wire<br/>(clipboard)" --> Agent1
-    Controller -- "CT2 wire<br/>(clipboard)" --> Agent2
+    Controller -- "CT3 wire<br/>(clipboard)" --> Agent1
+    Controller -- "CT3 wire<br/>(clipboard)" --> Agent2
 ```
 
-The Controller broadcasts a register command on startup. Each Agent generates a random 8-hex ID, waits a random delay (0.1–4.0s), and sends back its sysinfo. The Controller maintains a registry of all connected remotes. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds.
+On startup the Controller broadcasts an ANNOUNCE. Each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends back its sysinfo as a registration response. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic.
 
 ### Wire format
 
 ```
-CT2|<from>|<to>|<seq>|<type>|<payload>
+CT3|<from>|<to>|<seq>|<type>|<payload>
 ```
 
 | Field    | Value                                                                |
 |----------|----------------------------------------------------------------------|
-| `CT2`    | Protocol signature + version                                         |
-| `from`   | `C` (Controller) or 8-char hex (remote ID, e.g. `a1b2c3d4`)         |
-| `to`     | `C` (Controller), `*` (broadcast), or 8-char hex (specific remote)  |
-| `seq`    | Positive integer, monotonic per session                             |
-| `type`   | `C` (command), `R` (response), `E` (error), `A` (ack), `P` (ping)   |
+| `CT3`    | Protocol signature + version                                         |
+| `from`   | `C` + 7 hex (Controller) or `R` + 7 hex (remote ID, e.g. `R1b2c3d4`) |
+| `to`     | `C` + 7 hex (Controller), `*` (broadcast), or `R` + 7 hex (specific remote) |
+| `seq`    | Positive integer, monotonic per session (`0` = registration/heartbeat) |
+| `type`   | `C` (command), `R` (response), `E` (error), `A` (ack), `P` (ping), `N` (announce) |
 | `payload`| Base64-encoded UTF-8                                                 |
 
-### Registration flow
+### Registration and announce flow
 
 ```mermaid
 sequenceDiagram
@@ -70,17 +70,41 @@ sequenceDiagram
     participant A1 as Agent A
     participant A2 as Agent B
 
-    C->>A1: CT2|C|*|seq|C|{"op":"register"} (broadcast)
-    C->>A2: CT2|C|*|seq|C|{"op":"register"} (broadcast)
+    C->>A1: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
+    C->>A2: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
 
     Note over A1: random delay 0.1–4.0s
     Note over A2: random delay 0.1–4.0s
 
-    A1-->>C: CT2|a1b2c3d4|C|0|R|<sysinfo> (no ACK)
-    A2-->>C: CT2|e5f6a7b8|C|0|R|<sysinfo> (no ACK)
+    A1-->>C: CT3|R1b2c3d4|C1a2b3c4|0|R|<sysinfo> (registration)
+    C-->>A1: CT3|C1a2b3c4|R1b2c3d4|seq|A| (ACK)
+    A2-->>C: CT3|R5f6a7b8|C1a2b3c4|0|R|<sysinfo> (registration)
+    C-->>A2: CT3|C1a2b3c4|R5f6a7b8|seq|A| (ACK)
 
-    Note over C: registry updated:<br/>a1b2c3d4 → {sysinfo, alive}<br/>e5f6a7b8 → {sysinfo, alive}
+    Note over C: registry updated:<br/>R1b2c3d4 → {sysinfo, alive}<br/>R5f6a7b8 → {sysinfo, alive}
 ```
+
+Because the clipboard is a single last-writer-wins slot, simultaneous announce responses can collide and one agent's registration may be lost. The heartbeat below makes this self-healing: the missing agent re-registers on the next cycle.
+
+### Heartbeat
+
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant A as Agent
+
+    Note over A: every CLIPTUNNEL_HEARTBEAT_SECS (default 120s)<br/>+ random jitter 0–15s
+    A-->>C: CT3|R...|C...|0|R|<sysinfo> (registration re-send)
+    C-->>A: CT3|C...|R...|seq|A| (ACK)
+    Note over C: registry upsert + last_seen refreshed<br/>clipboard restored
+```
+
+Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` with `seq=0` carrying `sysinfo`) to every known controller on a configurable interval plus jitter. The jitter prevents multiple agents sharing a clipboard from synchronizing their writes. A lost heartbeat is harmless — the next one arrives. The controller's existing registration upsert path consumes it with no protocol or controller changes.
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `CLIPTUNNEL_HEARTBEAT_SECS` env var | `120` | Interval in seconds. `<= 0` disables the heartbeat. |
+| `Agent(heartbeat_secs=...)` | `None` (resolves env, then default) | Programmatic override of the env var. |
 
 ### Keepalive
 
@@ -90,13 +114,24 @@ sequenceDiagram
     participant A as Agent
 
     Note over C: idle > 5 min detected
-    C->>A: CT2|C|<hex>|seq|P| (ping)
-    A-->>C: CT2|<hex>|C|seq|A| (ACK)
+    C->>A: CT3|C...|R...|seq|P| (ping)
+    A-->>C: CT3|R...|C...|seq|A| (ACK)
     Note over C: last_seen updated
 
     Note over C,A: no response 30s after ping
     Note over C: status → dead
 ```
+
+With the heartbeat active, the keepalive loop stays mostly idle — it only pings remotes that have stopped heartbeating, and is what ultimately marks a silent agent `dead`.
+
+### Clipboard preservation
+
+The clipboard is the user's real pasteboard, so every protocol write would clobber whatever the user copied. ClipTunnel now preserves it:
+
+- **Backup** — the transport observes every clipboard change. Any non-empty value that is not CT3 protocol traffic (`CT3|…`) is retained as the user-clipboard candidate. The backup is also seeded at construction from the initial value, so a startup announce never destroys pre-existing content.
+- **Guarded restore** — after the Controller sends the final ACK of an exchange, it calls `transport.restore_user_clipboard()`. The restore happens **only if the OS clipboard still holds this process's last self-write**; if another process or the user wrote anything in between, the restore is a silent no-op (it would otherwise clobber that content). On success the backup is written back as a self-write.
+
+This makes the heartbeat and the restore synergistic: a racy restore that clobbers an in-flight message is cured by the next heartbeat, and the user's clipboard survives the protocol traffic.
 
 ## Installation
 
@@ -127,7 +162,7 @@ cliptunnel-agent
 > python -m cliptunnel_mcp.server   # instead of cliptunnel-mcp
 > ```
 
-The Agent generates a random 8-hex ID, registers with the Controller by sending its sysinfo, then watches the clipboard for commands. It uses `clipboard-event` for change detection (event-driven on Windows and Wayland, polling on macOS and X11).
+The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard for commands. It uses `clipboard-event` for change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
 
 ### Controller + MCP server (operator machine)
 
@@ -144,7 +179,7 @@ Configure your MCP client (Claude Desktop, Cursor, Pi, etc.):
 }
 ```
 
-The server broadcasts a register command on startup, discovers connected remotes, and maintains a live registry with keepalive pings.
+The server broadcasts an announce on startup, discovers connected remotes and any other controllers, and maintains a live registry with keepalive pings. After every exchange it restores the user's clipboard content.
 
 ### Controller only (no MCP)
 
@@ -156,12 +191,12 @@ import json
 controller = Controller(transport=ClipboardTransport())
 
 # Send to a specific remote
-future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}), remote_id="a1b2c3d4")
+future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}), remote_id="R1b2c3d4")
 result = future.result(timeout=30)
 
 # List connected remotes
 connections = controller.get_connections()
-# {"a1b2c3d4": {"os": "Windows", "status": "alive", "last_seen": 1692634123.4, "last_seen_ago": 0.3, ...}}
+# {"remotes": {"R1b2c3d4": {"os": "Windows", "status": "alive", "last_seen": 1692634123.4, "last_seen_ago": 0.3, ...}}, "controllers": {...}}
 ```
 
 ### Programmatic Agent
@@ -172,12 +207,13 @@ from cliptunnel_mcp import Agent
 from cliptunnel_mcp.operations import dispatch
 
 agent = Agent(transport=ClipboardTransport(), handler=dispatch)
-# Agent generates its own remote_id and registers automatically
+# Agent generates its own remote_id, registers automatically, and heartbeats every 120s.
+# Disable the heartbeat with heartbeat_secs=0 (or CLIPTUNNEL_HEARTBEAT_SECS=0).
 ```
 
 ## MCP tools
 
-The server exposes **25 tools** over stdio. All tools accept an optional `remote_id` parameter to target a specific remote. If omitted, the Controller picks the first alive remote.
+The server exposes **26 tools** over stdio. All tools accept an optional `remote_id` parameter to target a specific remote. If omitted, the Controller picks the first alive remote.
 
 ### Shell & filesystem
 
@@ -223,11 +259,12 @@ The server exposes **25 tools** over stdio. All tools accept an optional `remote
 | `remote_agent_clear` | Clear session message history. |
 | `remote_agent_end` | Destroy a session. |
 
-### Connections
+### Connections & discovery
 
 | Tool | Description |
 |------|-------------|
-| `remote_connections` | List all connected remotes with sysinfo, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
+| `remote_connections` | List all connected remotes and controllers with sysinfo, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
+| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard. |
 
 ## Operations
 
@@ -267,31 +304,39 @@ remote_agent_login()          # Returns user_code + verification_uri
 remote_agent_login_status()   # Returns {status: "done", token_saved: true}
 ```
 
-Token stored in `.copilot_agent_token` on the remote machine.
+Token stored in `.copilot_agent_token` on the remote machine. The token lookup is relative to the agent process working directory, so launch the agent from a directory that contains (or can access) the token file.
 
 ## API surface
 
 ### `Controller`
 
-The operator-side endpoint with remote registry and keepalive.
+The operator-side endpoint with remote + controller registry, keepalive, and clipboard restore.
 
 | Method | Description |
 |--------|-------------|
 | `send_command(command, remote_id=None) -> Future` | Queue a command to a specific remote (or first alive). |
 | `send_command_sync(command, remote_id=None) -> str \| None` | Send and block until response or timeout. |
-| `get_connections() -> dict` | Return the remote registry with sysinfo, last_seen, last_seen_ago, and status. |
+| `get_connections() -> dict` | Return `{"remotes": {...}, "controllers": {...}}` with sysinfo, last_seen, last_seen_ago, and status. |
 | `close()` | Stop background threads. Idempotent. |
 
 ### `Agent`
 
-The remote-side endpoint with auto-registration and ping handling.
+The remote-side endpoint with auto-registration, heartbeat, and ping handling.
 
 | Method | Description |
 |--------|-------------|
-| `close()` | Stop this agent. Idempotent. |
-| `send_registration()` | Send sysinfo to the Controller. |
+| `close()` | Stop this agent (heartbeat, reader, dispatcher, pool). Idempotent. |
+| `send_registration(controller_id=None)` | Send sysinfo to a controller (or all known controllers). Also used by the heartbeat. |
 
-Constructor parameters: `transport` (required), `handler` (required), `poll_interval`, `max_workers`, `response_ack_timeout`.
+Constructor parameters: `transport` (required), `handler` (required), `poll_interval`, `max_workers`, `response_ack_timeout`, `heartbeat_secs` (default `None` → resolves `CLIPTUNNEL_HEARTBEAT_SECS`, then `120`; `<= 0` disables).
+
+### `ClipboardTransport`
+
+| Method | Description |
+|--------|-------------|
+| `read() -> str \| None` | Return the current clipboard value (cached). |
+| `write(text: str)` | Write to the clipboard as a self-write. |
+| `restore_user_clipboard() -> bool` | Guarded restore of the backed-up user content; `True` on success, `False` if the slot was touched by another writer or no backup exists. |
 
 ### Protocol primitives
 
@@ -299,10 +344,11 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 |--------|-------------|
 | `pack(msg) -> str` | Serialize a `Message` into wire format. |
 | `unpack(raw) -> Message \| None` | Parse a wire string; `None` on malformed. |
-| `validate(raw, my_id) -> bool` | True if addressed to `my_id` (`C` or hex) or broadcast. |
-| `generate_remote_id() -> str` | Generate a random 8-char hex ID. |
+| `validate(raw, my_id) -> bool` | True if addressed to `my_id` (`C`/`R` + 7 hex) or broadcast. |
+| `generate_controller_id() -> str` | Generate `C` + 7 hex. |
+| `generate_remote_id() -> str` | Generate `R` + 7 hex. |
 | `Message` | Dataclass: `frm`, `to`, `seq`, `mtype`, `payload`. |
-| `MsgType` | Enum: `COMMAND`, `RESPONSE`, `ERROR`, `ACK`, `PING`. |
+| `MsgType` | Enum: `COMMAND`, `RESPONSE`, `ERROR`, `ACK`, `PING`, `ANNOUNCE`. |
 | `SeqTracker` | Per-seq dedupe state: new → processing → done. |
 
 ## Clipboard backend
@@ -316,7 +362,7 @@ ClipTunnel uses [clipboard-event](https://github.com/jordi-murgo/clipboard-event
 | Linux / Wayland | `wl-paste --watch` | Event-driven | Sub-ms |
 | Linux / X11 | `xclip`/`xsel` | Polling (100ms) | ~100ms |
 
-The `ClipboardTransport` adapts clipboard-event to the `Transport` and `RevisionMonitor` protocols. For custom setups, implement the `Transport` protocol directly.
+The `ClipboardTransport` adapts clipboard-event to the `Transport` and `RevisionMonitor` protocols, backs up non-protocol clipboard content, and guards restores against concurrent writers. For custom setups, implement the `Transport` protocol directly.
 
 ## Platform support
 
@@ -336,7 +382,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (232 tests)
+# Run the test suite (275 tests)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -352,19 +398,23 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 - **One command at a time**: the Controller dispatches commands serially per target remote.
 - **Immediate ACK**: the Agent ACKs every command before processing.
 - **One response at a time**: the Agent holds one pending response; retransmits until the Controller's ACK.
-- **Keepalive**: Controller pings remotes after 5 min idle, marks dead if no response within 30s.
+- **Announce discovery**: the Controller broadcasts an ANNOUNCE on startup and on `remote_discovery`; agents and other controllers reply. Replies can collide on the shared slot; the heartbeat makes this self-healing.
+- **Heartbeat**: each Agent re-sends its registration every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) + jitter (0–15s); `<= 0` disables. The controller upserts the roster on every heartbeat.
+- **Keepalive**: Controller pings remotes after 5 min idle, marks dead if no response within 30s. With the heartbeat active, this only fires for agents that have stopped heartbeating.
+- **Clipboard preservation**: the transport backs up non-CT3 clipboard content; the Controller restores it (guarded) after the final ACK of every exchange.
 - **Broadcast routing**: `to=*` messages are processed by all remotes with random backoff; no ACK.
-- **Targeted routing**: `to=<hex>` messages are processed only by that remote; others ignore.
+- **Targeted routing**: `to=<R+7hex>` messages are processed only by that remote; others ignore.
 - **Stale message guard**: the Controller skips R/E with `seq <= min_seq`.
 - **Generation-safe**: closing and restarting never strands threads.
 - **Paced writes**: bounded inter-write gap prevents message loss.
 
 ## Limitations
 
-- **Text-only clipboard**: the protocol carries UTF-8 strings. Binary files are base64-encoded.
-- **Shared slot**: multiple remotes share one clipboard; the protocol serializes all traffic.
+- **Text-only clipboard**: the protocol carries UTF-8 strings, and the preservation backup is text-only. Binary files are base64-encoded; rich content (images, RTF) copied by the user is not preserved by the restore.
+- **Shared slot**: multiple remotes and controllers share one clipboard; the protocol serializes all traffic, and announce responses can race (mitigated by the heartbeat).
 - **No encryption**: the wire format is plain base64.
-- **One Controller**: the protocol supports one Controller and multiple Agents, not multiple Controllers.
+- **Multi-controller**: multiple controllers are discovered and tracked, but they share the single clipboard channel — the protocol is designed for one primary Controller and multiple Agents.
+- **CT3-looking user content**: if the user copies a string starting with `CT3|`, it is treated as protocol traffic and not backed up.
 
 ## License
 

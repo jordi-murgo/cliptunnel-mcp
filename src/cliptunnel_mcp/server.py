@@ -35,6 +35,15 @@ import sys
 import threading
 import time
 import uuid
+from typing import TYPE_CHECKING
+
+# Context is needed at runtime for FastMCP type-annotation resolution.
+# This import pulls the mcp package, but only the server module (not the
+# core package) depends on mcp — cliptunnel_mcp.protocol and .controller stay clean.
+try:
+    from mcp.server.fastmcp.server import Context
+except ImportError:
+    Context = None  # type: ignore[assignment,misc]
 
 from cliptunnel_mcp.controller import Controller
 
@@ -60,6 +69,49 @@ def set_controller(controller: Controller | None) -> None:
 def _get_controller() -> Controller | None:
     with _controller_lock:
         return _controller
+
+def _capture_client_info(ctx) -> None:
+    """Extract client info from the MCP request context and update the controller.
+
+    Called from the first tool invocation — retrieves the client's name,
+    version, and protocol version from the MCP InitializeRequestParams and
+    updates the Controller's self-identity so it appears in connections.
+    """
+    controller = _get_controller()
+    if controller is None:
+        return
+    try:
+        session = ctx.session
+        client_params = getattr(session, "client_params", None)
+        if client_params is None:
+            return
+        client_info = getattr(client_params, "clientInfo", None)
+        if client_info is not None:
+            client_name = getattr(client_info, "name", None) or "unknown"
+            client_version = getattr(client_info, "version", None) or ""
+            protocol_version = getattr(client_params, "protocolVersion", None) or ""
+            # Update the controller's display name and metadata.
+            display = f"{client_name}/{client_version}" if client_version else client_name
+            controller.name = display
+            with controller._registry_lock:
+                existing = controller._controllers.get(controller.controller_id, {})
+                existing.update({
+                    "name": display,
+                    "mcp_protocol_version": str(protocol_version),
+                    "mcp_client_name": client_name,
+                    "mcp_client_version": client_version,
+                    "last_seen": time.time(),
+                    "status": "alive",
+                })
+                controller._controllers[controller.controller_id] = existing
+            logger.info("client identified: %s (protocol %s)", display, protocol_version)
+            # Re-announce so other controllers see the updated mcp_* fields.
+            controller._send_announce()
+    except Exception:
+        logger.debug("could not extract client info from context", exc_info=True)
+
+
+_client_info_captured = False
 
 
 def reset() -> None:
@@ -465,12 +517,11 @@ def create_server():
     """
     from mcp.server.fastmcp import FastMCP
 
+
     mcp = FastMCP("cliptunnel")
 
-    # ── Shell ────────────────────────────────────────────────────────────────
-
     @mcp.tool()
-    def remote_shell(cmd: str, sync_timeout: float = 10.0, timeout: float = 60.0, remote_id: str | None = None) -> str:
+    def remote_shell(cmd: str, sync_timeout: float = 10.0, timeout: float = 60.0, remote_id: str | None = None, ctx: Context | None = None) -> str:
         """Execute a shell command on the remote machine (Agent side).
 
         Waits up to *sync_timeout* seconds (default 10) for the command to
@@ -483,6 +534,10 @@ def create_server():
         waits for the subprocess to finish before killing it. Increase it
         for long-running commands.
         """
+        global _client_info_captured
+        if not _client_info_captured:
+            _capture_client_info(ctx)
+            _client_info_captured = True
         return json.dumps(shell_auto(cmd, sync_timeout=sync_timeout, timeout=timeout, remote_id=remote_id))
     @mcp.tool()
     def remote_shell_result(job_id: str) -> str:
@@ -534,23 +589,52 @@ def create_server():
     # ── System info ───────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def remote_sysinfo(remote_id: str | None = None) -> str:
+    def remote_sysinfo(ctx: Context | None = None, remote_id: str | None = None) -> str:
         """Return system information from the remote machine: OS, hostname,
         architecture, Python version, cliptunnel-mcp version, CPU count,
         memory, disk, current user, and working directory."""
+        global _client_info_captured
+        if not _client_info_captured:
+            _capture_client_info(ctx)
+            _client_info_captured = True
         return _send(sysinfo, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_connections() -> str:
-        """List all connected remotes with their sysinfo, last_seen, and status.
+    def remote_connections(ctx: Context | None = None) -> str:
+        """List all connected controllers and remotes with their info, last_seen, and status.
 
-        Returns JSON dict of remote_id -> {sysinfo fields, last_seen, status}.
-        status is 'alive' or 'dead'. last_seen is seconds since last message.
+        Returns JSON dict with two sub-dicts:
+        - ``controllers``: controller_id -> {name, version, mcp_client_name, mcp_client_version, mcp_protocol_version, last_seen, last_seen_ago, status}
+
+        status is 'alive' or 'dead'. last_seen_ago is seconds since last message.
+        """
+        global _client_info_captured
+        if not _client_info_captured:
+            _capture_client_info(ctx)
+            _client_info_captured = True
+        controller = _get_controller()
+        if controller is None:
+            return json.dumps({"controllers": {}, "remotes": {}})
+        return json.dumps(controller.get_connections())
+
+    @mcp.tool()
+    def remote_discovery() -> str:
+        """Broadcast an ANNOUNCE to discover remotes and other controllers.
+
+        Triggers a fresh broadcast on the shared clipboard. Agents that
+        are running will respond with their sysinfo, and other controllers
+        will register this controller's presence.
+
+        Use this when agents may have started after the initial announcement,
+        or when the clipboard was busy and the ANNOUNCE was lost.
+
+        Returns JSON ``{"status": "announced"}``.
         """
         controller = _get_controller()
         if controller is None:
-            return json.dumps({})
-        return json.dumps(controller.get_connections())
+            return json.dumps({"status": "error", "error": "no controller configured"})
+        controller.discover()
+        return json.dumps({"status": "announced"})
 
     @mcp.tool()
     def remote_fs_find(path: str, pattern: str, remote_id: str | None = None) -> str:

@@ -12,9 +12,11 @@ from cliptunnel_mcp.protocol import (
     Message,
     MsgType,
     SeqTracker,
+    generate_controller_id,
     generate_remote_id,
     is_broadcast,
     is_controller,
+    is_remote,
     is_valid_address,
     is_valid_from_address,
     is_valid_to_address,
@@ -23,8 +25,9 @@ from cliptunnel_mcp.protocol import (
     validate,
 )
 
-# Fixed test remote ID — 8-char hex, used everywhere an agent address is needed.
-TEST_REMOTE_ID = "deadbeef"
+# Fixed test IDs — CT3 format: R/C + 7 hex.
+TEST_REMOTE_ID = "R1a2b3c4"
+TEST_CONTROLLER_ID = "C1a2b3c4"
 
 
 class TestPackageIdentity(unittest.TestCase):
@@ -41,6 +44,7 @@ class TestPackageIdentity(unittest.TestCase):
         self.assertIs(cliptunnel_mcp.MsgType, MsgType)
         self.assertIs(cliptunnel_mcp.SeqTracker, SeqTracker)
         self.assertIs(cliptunnel_mcp.generate_remote_id, generate_remote_id)
+        self.assertIs(cliptunnel_mcp.generate_controller_id, generate_controller_id)
         self.assertIs(cliptunnel_mcp.CONTROLLER_ADDR, CONTROLLER_ADDR)
         self.assertIs(cliptunnel_mcp.BROADCAST_ADDR, BROADCAST_ADDR)
 
@@ -53,10 +57,10 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(BROADCAST_ADDR, "*")
 
     def test_protocol_sig(self):
-        self.assertEqual(PROTOCOL_SIG, "CT2")
+        self.assertEqual(PROTOCOL_SIG, "CT3")
 
     def test_protocol_version(self):
-        self.assertEqual(PROTOCOL_VERSION, 2)
+        self.assertEqual(PROTOCOL_VERSION, 3)
 
 
 class TestMsgTypeEnumValues(unittest.TestCase):
@@ -75,36 +79,63 @@ class TestMsgTypeEnumValues(unittest.TestCase):
     def test_ping(self):
         self.assertEqual(MsgType.PING.value, "P")
 
+    def test_announce(self):
+        self.assertEqual(MsgType.ANNOUNCE.value, "N")
+
 
 class TestMessageConstruction(unittest.TestCase):
     def test_message_fields(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls -la")
-        self.assertEqual(m.frm, "C")
-        self.assertEqual(m.to, "deadbeef")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls -la")
+        self.assertEqual(m.frm, TEST_CONTROLLER_ID)
+        self.assertEqual(m.to, TEST_REMOTE_ID)
         self.assertEqual(m.seq, 1)
         self.assertEqual(m.mtype, "C")
         self.assertEqual(m.payload, "ls -la")
 
     def test_message_fields_are_plain_strings(self):
-        m = Message(frm=TEST_REMOTE_ID, to=CONTROLLER_ADDR, seq=99, mtype="R", payload="ok")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=99, mtype="R", payload="ok")
         self.assertIsInstance(m.frm, str)
         self.assertIsInstance(m.to, str)
 
 
 class TestGenerateRemoteId(unittest.TestCase):
-    def test_generates_8_hex_chars(self):
+    def test_generates_r_prefix_8_chars(self):
         rid = generate_remote_id()
         self.assertEqual(len(rid), 8)
+        self.assertTrue(rid.startswith("R"))
         self.assertTrue(is_valid_address(rid))
 
     def test_generates_different_ids(self):
         ids = {generate_remote_id() for _ in range(100)}
-        # Collisions in 100 random 32-bit IDs are astronomically unlikely.
+        # Collisions in 100 random IDs are astronomically unlikely.
         self.assertGreater(len(ids), 90)
 
-    def test_generated_id_is_lowercase_hex(self):
+    def test_generated_id_is_r_plus_7_hex(self):
         rid = generate_remote_id()
-        self.assertTrue(all(c in "0123456789abcdef" for c in rid))
+        self.assertEqual(rid[0], "R")
+        self.assertTrue(all(c in "0123456789abcdef" for c in rid[1:]))
+
+
+class TestGenerateControllerId(unittest.TestCase):
+    def test_generates_c_prefix_8_chars(self):
+        cid = generate_controller_id()
+        self.assertEqual(len(cid), 8)
+        self.assertTrue(cid.startswith("C"))
+        self.assertTrue(is_valid_address(cid))
+
+    def test_generates_different_ids(self):
+        ids = {generate_controller_id() for _ in range(100)}
+        self.assertGreater(len(ids), 90)
+
+    def test_generated_id_is_c_plus_7_hex(self):
+        cid = generate_controller_id()
+        self.assertEqual(cid[0], "C")
+        self.assertTrue(all(c in "0123456789abcdef" for c in cid[1:]))
+
+    def test_generated_controller_id_is_controller(self):
+        cid = generate_controller_id()
+        self.assertTrue(is_controller(cid))
+        self.assertFalse(is_remote(cid))
 
 
 class TestIsValidAddress(unittest.TestCase):
@@ -114,7 +145,18 @@ class TestIsValidAddress(unittest.TestCase):
     def test_broadcast_addr_valid(self):
         self.assertTrue(is_valid_address(BROADCAST_ADDR))
 
-    def test_8_char_hex_valid(self):
+    def test_ct3_controller_id_valid(self):
+        self.assertTrue(is_valid_address(TEST_CONTROLLER_ID))
+        self.assertTrue(is_valid_address("C0000000"))
+        self.assertTrue(is_valid_address("Cabcdef0"))
+
+    def test_ct3_remote_id_valid(self):
+        self.assertTrue(is_valid_address(TEST_REMOTE_ID))
+        self.assertTrue(is_valid_address("R0000000"))
+        self.assertTrue(is_valid_address("Rabcdef0"))
+
+    def test_legacy_8_char_hex_valid(self):
+        # Legacy bare 8-hex IDs are still valid for backward compat.
         self.assertTrue(is_valid_address("deadbeef"))
         self.assertTrue(is_valid_address("00000000"))
         self.assertTrue(is_valid_address("ffffffff"))
@@ -132,12 +174,22 @@ class TestIsValidAddress(unittest.TestCase):
     def test_non_hex_invalid(self):
         self.assertFalse(is_valid_address("xyzw1234"))
 
+    def test_short_ct3_id_invalid(self):
+        self.assertFalse(is_valid_address("C1a2b3c"))
+        self.assertFalse(is_valid_address("R1a2b3c"))
+
 
 class TestIsValidFromAddress(unittest.TestCase):
     def test_controller_valid(self):
         self.assertTrue(is_valid_from_address(CONTROLLER_ADDR))
 
-    def test_hex_valid(self):
+    def test_ct3_controller_id_valid(self):
+        self.assertTrue(is_valid_from_address(TEST_CONTROLLER_ID))
+
+    def test_ct3_remote_id_valid(self):
+        self.assertTrue(is_valid_from_address(TEST_REMOTE_ID))
+
+    def test_legacy_hex_valid(self):
         self.assertTrue(is_valid_from_address("deadbeef"))
 
     def test_broadcast_invalid(self):
@@ -151,10 +203,16 @@ class TestIsValidToAddress(unittest.TestCase):
     def test_controller_valid(self):
         self.assertTrue(is_valid_to_address(CONTROLLER_ADDR))
 
+    def test_ct3_controller_id_valid(self):
+        self.assertTrue(is_valid_to_address(TEST_CONTROLLER_ID))
+
+    def test_ct3_remote_id_valid(self):
+        self.assertTrue(is_valid_to_address(TEST_REMOTE_ID))
+
     def test_broadcast_valid(self):
         self.assertTrue(is_valid_to_address(BROADCAST_ADDR))
 
-    def test_hex_valid(self):
+    def test_legacy_hex_valid(self):
         self.assertTrue(is_valid_to_address("deadbeef"))
 
     def test_short_hex_invalid(self):
@@ -182,9 +240,27 @@ class TestIsController(unittest.TestCase):
         self.assertTrue(is_controller(CONTROLLER_ADDR))
         self.assertTrue(is_controller("C"))
 
+    def test_ct3_controller_id(self):
+        self.assertTrue(is_controller(TEST_CONTROLLER_ID))
+        self.assertTrue(is_controller("C0000000"))
+        self.assertTrue(is_controller("Cabcdef0"))
+
     def test_non_controller(self):
         self.assertFalse(is_controller(TEST_REMOTE_ID))
         self.assertFalse(is_controller(BROADCAST_ADDR))
+        self.assertFalse(is_controller("deadbeef"))
+
+
+class TestIsRemote(unittest.TestCase):
+    def test_ct3_remote_id(self):
+        self.assertTrue(is_remote(TEST_REMOTE_ID))
+        self.assertTrue(is_remote("R0000000"))
+        self.assertTrue(is_remote("Rabcdef0"))
+
+    def test_non_remote(self):
+        self.assertFalse(is_remote(TEST_CONTROLLER_ID))
+        self.assertFalse(is_remote(BROADCAST_ADDR))
+        self.assertFalse(is_remote("deadbeef"))
 
 
 class TestIsBroadcast(unittest.TestCase):
@@ -199,84 +275,99 @@ class TestIsBroadcast(unittest.TestCase):
 
 class TestPack(unittest.TestCase):
     def test_pack_basic(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=41, mtype="C", payload="ls")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=41, mtype="C", payload="ls")
         result = pack(m)
-        self.assertTrue(result.startswith("CT2|C|deadbeef|41|C|"))
+        self.assertTrue(result.startswith("CT3|C1a2b3c4|R1a2b3c4|41|C|"))
         # payload "ls" base64 = "bHM="
-        self.assertEqual(result, "CT2|C|deadbeef|41|C|bHM=")
+        self.assertEqual(result, "CT3|C1a2b3c4|R1a2b3c4|41|C|bHM=")
 
     def test_pack_unicode(self):
-        m = Message(frm=TEST_REMOTE_ID, to=CONTROLLER_ADDR, seq=1, mtype="R", payload="cañón")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=1, mtype="R", payload="cañón")
         result = pack(m)
-        self.assertTrue(result.startswith("CT2|deadbeef|C|1|R|"))
+        self.assertTrue(result.startswith("CT3|R1a2b3c4|C1a2b3c4|1|R|"))
         # payload must be base64-encoded (no raw unicode in wire format)
         self.assertNotIn("cañón", result)
 
     def test_pack_special_chars(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="echo 'a|b|c'")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="echo 'a|b|c'")
         result = pack(m)
         # pipe chars in payload must not appear raw (they're base64-encoded)
         parts = result.split("|")
         self.assertEqual(len(parts), 6)
-        self.assertEqual(parts[0], "CT2")
+        self.assertEqual(parts[0], "CT3")
 
     def test_pack_empty_payload(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="")
-        self.assertEqual(pack(m), "CT2|C|deadbeef|1|C|")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="")
+        self.assertEqual(pack(m), "CT3|C1a2b3c4|R1a2b3c4|1|C|")
 
     def test_pack_ack_empty_payload(self):
-        m = Message(frm=TEST_REMOTE_ID, to=CONTROLLER_ADDR, seq=41, mtype="A", payload="")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=41, mtype="A", payload="")
         result = pack(m)
-        self.assertTrue(result.startswith("CT2|deadbeef|C|41|A|"))
+        self.assertTrue(result.startswith("CT3|R1a2b3c4|C1a2b3c4|41|A|"))
         # empty payload base64 = ""
-        self.assertEqual(result, "CT2|deadbeef|C|41|A|")
+        self.assertEqual(result, "CT3|R1a2b3c4|C1a2b3c4|41|A|")
 
     def test_pack_broadcast_to(self):
-        m = Message(frm=CONTROLLER_ADDR, to=BROADCAST_ADDR, seq=1, mtype="C", payload="register")
+        m = Message(frm=TEST_CONTROLLER_ID, to=BROADCAST_ADDR, seq=1, mtype="C", payload="register")
         result = pack(m)
-        self.assertTrue(result.startswith("CT2|C|*|1|C|"))
+        self.assertTrue(result.startswith("CT3|C1a2b3c4|*|1|C|"))
 
     def test_pack_ping(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=5, mtype="P", payload="")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=5, mtype="P", payload="")
         result = pack(m)
-        self.assertEqual(result, "CT2|C|deadbeef|5|P|")
+        self.assertEqual(result, "CT3|C1a2b3c4|R1a2b3c4|5|P|")
+
+    def test_pack_announce(self):
+        m = Message(frm=TEST_CONTROLLER_ID, to=BROADCAST_ADDR, seq=1, mtype="N", payload="")
+        result = pack(m)
+        self.assertEqual(result, "CT3|C1a2b3c4|*|1|N|")
 
 
 class TestUnpack(unittest.TestCase):
     def test_unpack_valid(self):
-        raw = "CT2|C|deadbeef|41|C|bHM="
+        raw = "CT3|C1a2b3c4|R1a2b3c4|41|C|bHM="
         m = unpack(raw)
         self.assertIsNotNone(m)
-        self.assertEqual(m.frm, "C")
-        self.assertEqual(m.to, "deadbeef")
+        self.assertEqual(m.frm, "C1a2b3c4")
+        self.assertEqual(m.to, "R1a2b3c4")
         self.assertEqual(m.seq, 41)
         self.assertEqual(m.mtype, "C")
         self.assertEqual(m.payload, "ls")
 
     def test_unpack_response(self):
-        raw = "CT2|deadbeef|C|41|R|cmVzdWx0YWRv"
+        raw = "CT3|R1a2b3c4|C1a2b3c4|41|R|cmVzdWx0YWRv"
         m = unpack(raw)
         self.assertIsNotNone(m)
-        self.assertEqual(m.frm, "deadbeef")
-        self.assertEqual(m.to, "C")
+        self.assertEqual(m.frm, "R1a2b3c4")
+        self.assertEqual(m.to, "C1a2b3c4")
         self.assertEqual(m.mtype, "R")
         self.assertEqual(m.payload, "resultado")
 
     def test_unpack_error(self):
-        raw = "CT2|deadbeef|C|41|E|ZXJyb3I="
+        raw = "CT3|R1a2b3c4|C1a2b3c4|41|E|ZXJyb3I="
         m = unpack(raw)
         self.assertIsNotNone(m)
         self.assertEqual(m.mtype, "E")
         self.assertEqual(m.payload, "error")
 
     def test_unpack_ping(self):
-        raw = "CT2|C|deadbeef|5|P|"
+        raw = "CT3|C1a2b3c4|R1a2b3c4|5|P|"
         m = unpack(raw)
         self.assertIsNotNone(m)
-        self.assertEqual(m.frm, "C")
-        self.assertEqual(m.to, "deadbeef")
+        self.assertEqual(m.frm, "C1a2b3c4")
+        self.assertEqual(m.to, "R1a2b3c4")
         self.assertEqual(m.seq, 5)
         self.assertEqual(m.mtype, "P")
+        self.assertEqual(m.payload, "")
+
+    def test_unpack_announce(self):
+        raw = "CT3|C1a2b3c4|*|1|N|"
+        m = unpack(raw)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.frm, "C1a2b3c4")
+        self.assertEqual(m.to, "*")
+        self.assertEqual(m.seq, 1)
+        self.assertEqual(m.mtype, "N")
         self.assertEqual(m.payload, "")
 
     def test_unpack_unicode(self):
@@ -284,43 +375,54 @@ class TestUnpack(unittest.TestCase):
 
         payload = "cañón"
         encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
-        raw = f"CT2|deadbeef|C|1|R|{encoded}"
+        raw = f"CT3|R1a2b3c4|C1a2b3c4|1|R|{encoded}"
         m = unpack(raw)
         self.assertIsNotNone(m)
         self.assertEqual(m.payload, "cañón")
 
+    def test_unpack_accepts_legacy_ct2_format(self):
+        # Legacy bare 8-hex IDs are accepted for backward compat.
+        raw = "CT3|deadbeef|C1a2b3c4|1|C|bHM="
+        m = unpack(raw)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.frm, "deadbeef")
+        self.assertEqual(m.to, "C1a2b3c4")
+
     def test_unpack_rejects_legacy_ct1_signature(self):
-        self.assertIsNone(unpack("CT1|C|deadbeef|1|C|bHM="))
+        self.assertIsNone(unpack("CT1|C1a2b3c4|R1a2b3c4|1|C|bHM="))
 
     def test_unpack_rejects_legacy_cb1_signature(self):
-        self.assertIsNone(unpack("CB1|C|deadbeef|1|C|bHM="))
+        self.assertIsNone(unpack("CB1|C1a2b3c4|R1a2b3c4|1|C|bHM="))
+
+    def test_unpack_rejects_ct2_signature(self):
+        self.assertIsNone(unpack("CT2|C1a2b3c4|R1a2b3c4|1|C|bHM="))
 
     def test_unpack_rejects_bad_from_address(self):
-        self.assertIsNone(unpack("CT2|X|deadbeef|1|C|bHM="))
+        self.assertIsNone(unpack("CT3|X|deadbeef|1|C|bHM="))
 
     def test_unpack_rejects_bad_to_address(self):
-        self.assertIsNone(unpack("CT2|C|Z|1|C|bHM="))
+        self.assertIsNone(unpack("CT3|C1a2b3c4|Z|1|C|bHM="))
 
     def test_unpack_rejects_short_hex_from(self):
-        self.assertIsNone(unpack("CT2|dead|deadbeef|1|C|bHM="))
+        self.assertIsNone(unpack("CT3|dead|deadbeef|1|C|bHM="))
 
     def test_unpack_rejects_uppercase_hex(self):
-        self.assertIsNone(unpack("CT2|DeadBeef|C|1|C|bHM="))
+        self.assertIsNone(unpack("CT3|DeadBeef|C1a2b3c4|1|C|bHM="))
 
     def test_unpack_invalid_prefix(self):
-        self.assertIsNone(unpack("XX|C|deadbeef|1|C|bHM="))
+        self.assertIsNone(unpack("XX|C1a2b3c4|R1a2b3c4|1|C|bHM="))
 
     def test_unpack_too_few_parts(self):
-        self.assertIsNone(unpack("CT2|C|deadbeef|1|C"))
+        self.assertIsNone(unpack("CT3|C1a2b3c4|R1a2b3c4|1|C"))
 
     def test_unpack_too_many_parts(self):
-        self.assertIsNone(unpack("CT2|C|deadbeef|1|C|bHM=|extra"))
+        self.assertIsNone(unpack("CT3|C1a2b3c4|R1a2b3c4|1|C|bHM=|extra"))
 
     def test_unpack_non_integer_seq(self):
-        self.assertIsNone(unpack("CT2|C|deadbeef|abc|C|bHM="))
+        self.assertIsNone(unpack("CT3|C1a2b3c4|R1a2b3c4|abc|C|bHM="))
 
     def test_unpack_invalid_base64(self):
-        self.assertIsNone(unpack("CT2|C|deadbeef|1|C|@@@notb64@@@"))
+        self.assertIsNone(unpack("CT3|C1a2b3c4|R1a2b3c4|1|C|@@@notb64@@@"))
 
     def test_unpack_empty_string(self):
         self.assertIsNone(unpack(""))
@@ -329,17 +431,17 @@ class TestUnpack(unittest.TestCase):
         self.assertIsNone(unpack(None))
 
     def test_unpack_ack(self):
-        raw = "CT2|deadbeef|C|41|A|"
+        raw = "CT3|R1a2b3c4|C1a2b3c4|41|A|"
         m = unpack(raw)
         self.assertIsNotNone(m)
-        self.assertEqual(m.frm, "deadbeef")
-        self.assertEqual(m.to, "C")
+        self.assertEqual(m.frm, "R1a2b3c4")
+        self.assertEqual(m.to, "C1a2b3c4")
         self.assertEqual(m.seq, 41)
         self.assertEqual(m.mtype, "A")
         self.assertEqual(m.payload, "")
 
     def test_unpack_broadcast_to(self):
-        raw = "CT2|C|*|1|C|eyJvcCI6ICJyZWdpc3RlciJ9"
+        raw = "CT3|C1a2b3c4|*|1|C|eyJvcCI6ICJyZWdpc3RlciJ9"
         m = unpack(raw)
         self.assertIsNotNone(m)
         self.assertEqual(m.to, "*")
@@ -348,7 +450,7 @@ class TestUnpack(unittest.TestCase):
 
 class TestRoundTrip(unittest.TestCase):
     def test_roundtrip_basic(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls -la")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls -la")
         raw = pack(m)
         m2 = unpack(raw)
         self.assertIsNotNone(m2)
@@ -359,7 +461,7 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(m.payload, m2.payload)
 
     def test_roundtrip_unicode(self):
-        m = Message(frm=TEST_REMOTE_ID, to=CONTROLLER_ADDR, seq=99, mtype="R", payload="résultat café")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=99, mtype="R", payload="résultat café")
         raw = pack(m)
         m2 = unpack(raw)
         self.assertIsNotNone(m2)
@@ -367,36 +469,44 @@ class TestRoundTrip(unittest.TestCase):
 
     def test_roundtrip_pipes_newlines_tabs(self):
         payload = "echo 'hello|world' && cat file.txt\nnewline\ttab"
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=5, mtype="C", payload=payload)
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=5, mtype="C", payload=payload)
         raw = pack(m)
         m2 = unpack(raw)
         self.assertIsNotNone(m2)
         self.assertEqual(m.payload, m2.payload)
 
     def test_roundtrip_empty_payload(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="")
         raw = pack(m)
         m2 = unpack(raw)
         self.assertIsNotNone(m2)
         self.assertEqual(m.payload, m2.payload)
 
     def test_roundtrip_error_type(self):
-        m = Message(frm=TEST_REMOTE_ID, to=CONTROLLER_ADDR, seq=7, mtype="E", payload="command not found")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=7, mtype="E", payload="command not found")
         raw = pack(m)
         m2 = unpack(raw)
         self.assertEqual(m2.mtype, "E")
         self.assertEqual(m2.payload, "command not found")
 
     def test_roundtrip_ping(self):
-        m = Message(frm=CONTROLLER_ADDR, to=TEST_REMOTE_ID, seq=3, mtype="P", payload="")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=3, mtype="P", payload="")
         raw = pack(m)
         m2 = unpack(raw)
         self.assertIsNotNone(m2)
         self.assertEqual(m2.mtype, "P")
         self.assertEqual(m2.payload, "")
 
+    def test_roundtrip_announce(self):
+        m = Message(frm=TEST_CONTROLLER_ID, to=BROADCAST_ADDR, seq=1, mtype="N", payload="")
+        raw = pack(m)
+        m2 = unpack(raw)
+        self.assertIsNotNone(m2)
+        self.assertEqual(m2.mtype, "N")
+        self.assertEqual(m2.payload, "")
+
     def test_roundtrip_broadcast(self):
-        m = Message(frm=CONTROLLER_ADDR, to=BROADCAST_ADDR, seq=1, mtype="C", payload='{"op": "register"}')
+        m = Message(frm=TEST_CONTROLLER_ID, to=BROADCAST_ADDR, seq=1, mtype="C", payload='{"op": "register"}')
         raw = pack(m)
         m2 = unpack(raw)
         self.assertIsNotNone(m2)
@@ -406,87 +516,95 @@ class TestRoundTrip(unittest.TestCase):
 
 class TestValidate(unittest.TestCase):
     def test_validate_valid_for_remote(self):
-        raw = "CT2|C|deadbeef|1|C|bHM="
+        raw = "CT3|C1a2b3c4|R1a2b3c4|1|C|bHM="
         self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_valid_for_controller(self):
-        raw = "CT2|deadbeef|C|1|R|bHM="
-        self.assertTrue(validate(raw, CONTROLLER_ADDR))
+        raw = "CT3|R1a2b3c4|C1a2b3c4|1|R|bHM="
+        self.assertTrue(validate(raw, TEST_CONTROLLER_ID))
 
     def test_validate_rejects_missing_prefix(self):
-        raw = "XX|C|deadbeef|1|C|bHM="
+        raw = "XX|C1a2b3c4|R1a2b3c4|1|C|bHM="
         self.assertFalse(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_rejects_legacy_ct1_signature(self):
-        raw = "CT1|C|deadbeef|1|C|bHM="
+        raw = "CT1|C1a2b3c4|R1a2b3c4|1|C|bHM="
+        self.assertFalse(validate(raw, TEST_REMOTE_ID))
+
+    def test_validate_rejects_ct2_signature(self):
+        raw = "CT2|C1a2b3c4|R1a2b3c4|1|C|bHM="
         self.assertFalse(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_rejects_wrong_to(self):
-        # message addressed to C, but I am deadbeef
-        raw = "CT2|C|C|1|C|bHM="
+        # message addressed to C1a2b3c4, but I am R1a2b3c4
+        raw = "CT3|R1a2b3c4|C1a2b3c4|1|C|bHM="
         self.assertFalse(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_rejects_from_equals_my_id(self):
-        # from deadbeef, I am deadbeef — self-addressed, reject
-        raw = "CT2|deadbeef|deadbeef|1|C|bHM="
+        # from R1a2b3c4, I am R1a2b3c4 — self-addressed, reject
+        raw = "CT3|R1a2b3c4|R1a2b3c4|1|C|bHM="
         self.assertFalse(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_rejects_from_equals_controller_id(self):
-        # from C, I am C — self-addressed, reject
-        raw = "CT2|C|C|1|C|bHM="
-        self.assertFalse(validate(raw, CONTROLLER_ADDR))
+        # from C1a2b3c4, I am C1a2b3c4 — self-addressed, reject
+        raw = "CT3|C1a2b3c4|C1a2b3c4|1|C|bHM="
+        self.assertFalse(validate(raw, TEST_CONTROLLER_ID))
 
     def test_validate_rejects_bad_addresses(self):
-        self.assertFalse(validate("CT2|X|deadbeef|1|C|bHM=", TEST_REMOTE_ID))
-        self.assertFalse(validate("CT2|C|Z|1|C|bHM=", TEST_REMOTE_ID))
+        self.assertFalse(validate("CT3|X|deadbeef|1|C|bHM=", TEST_REMOTE_ID))
+        self.assertFalse(validate("CT3|C1a2b3c4|Z|1|C|bHM=", TEST_REMOTE_ID))
 
     def test_validate_rejects_malformed_format(self):
-        self.assertFalse(validate("CT2|C|deadbeef|1|C", TEST_REMOTE_ID))
-        self.assertFalse(validate("CT2|C|deadbeef|1|C|bHM=|extra", TEST_REMOTE_ID))
+        self.assertFalse(validate("CT3|C1a2b3c4|R1a2b3c4|1|C", TEST_REMOTE_ID))
+        self.assertFalse(validate("CT3|C1a2b3c4|R1a2b3c4|1|C|bHM=|extra", TEST_REMOTE_ID))
         self.assertFalse(validate("", TEST_REMOTE_ID))
 
     def test_validate_rejects_non_integer_seq(self):
-        self.assertFalse(validate("CT2|C|deadbeef|abc|C|bHM=", TEST_REMOTE_ID))
+        self.assertFalse(validate("CT3|C1a2b3c4|R1a2b3c4|abc|C|bHM=", TEST_REMOTE_ID))
 
     def test_validate_rejects_invalid_base64(self):
-        self.assertFalse(validate("CT2|C|deadbeef|1|C|@@@bad@@@", TEST_REMOTE_ID))
+        self.assertFalse(validate("CT3|C1a2b3c4|R1a2b3c4|1|C|@@@bad@@@", TEST_REMOTE_ID))
 
     def test_validate_accepts_ack_for_controller(self):
-        raw = "CT2|deadbeef|C|41|A|"
-        self.assertTrue(validate(raw, CONTROLLER_ADDR))
+        raw = "CT3|R1a2b3c4|C1a2b3c4|41|A|"
+        self.assertTrue(validate(raw, TEST_CONTROLLER_ID))
 
     def test_validate_accepts_ack_for_remote(self):
-        raw = "CT2|C|deadbeef|41|A|"
+        raw = "CT3|C1a2b3c4|R1a2b3c4|41|A|"
         self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_accepts_ping_for_remote(self):
-        raw = "CT2|C|deadbeef|5|P|"
+        raw = "CT3|C1a2b3c4|R1a2b3c4|5|P|"
         self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
     # ── broadcast routing ──────────────────────────────────────────────
 
     def test_validate_accepts_broadcast_for_remote(self):
-        raw = "CT2|C|*|1|C|bHM="
+        raw = "CT3|C1a2b3c4|*|1|C|bHM="
         self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_accepts_broadcast_for_controller(self):
         # A remote could broadcast to '*' — controller should accept it
-        raw = "CT2|deadbeef|*|1|R|bHM="
-        self.assertTrue(validate(raw, CONTROLLER_ADDR))
+        raw = "CT3|R1a2b3c4|*|1|R|bHM="
+        self.assertTrue(validate(raw, TEST_CONTROLLER_ID))
 
     def test_validate_rejects_broadcast_from_self(self):
-        # from deadbeef, to *, I am deadbeef — self-addressed, reject
-        raw = "CT2|deadbeef|*|1|C|bHM="
+        # from R1a2b3c4, to *, I am R1a2b3c4 — self-addressed, reject
+        raw = "CT3|R1a2b3c4|*|1|C|bHM="
         self.assertFalse(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_broadcast_from_controller_accepted_by_remote(self):
-        raw = "CT2|C|*|1|C|eyJvcCI6ICJyZWdpc3RlciJ9"
+        raw = "CT3|C1a2b3c4|*|1|C|eyJvcCI6ICJyZWdpc3RlciJ9"
         self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
     def test_validate_broadcast_not_accepted_by_controller_from_self(self):
         # Controller broadcasting to itself via '*' — reject
-        raw = "CT2|C|*|1|C|bHM="
-        self.assertFalse(validate(raw, CONTROLLER_ADDR))
+        raw = "CT3|C1a2b3c4|*|1|C|bHM="
+        self.assertFalse(validate(raw, TEST_CONTROLLER_ID))
+
+    def test_validate_accepts_announce_for_remote(self):
+        raw = "CT3|C1a2b3c4|*|1|N|"
+        self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
 
 class TestSeqTracker(unittest.TestCase):
