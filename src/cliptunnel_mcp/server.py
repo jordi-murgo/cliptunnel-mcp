@@ -947,6 +947,10 @@ def main() -> None:
 
     transport = build_transport()
 
+    from cliptunnel_mcp.controller import Controller
 
-if __name__ == "__main__":
+    set_controller(Controller(transport=transport))
+    logger.info("Controller wired to %s transport", transport.backend_name)
+
+    create_server().run(transport="stdio")
     main()
