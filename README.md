@@ -140,7 +140,7 @@ pip install cliptunnel-mcp          # core + cliptunnel-agent binary
 pip install cliptunnel-mcp[server]  # adds MCP server binary (mcp>=1.2,<2)
 ```
 
-Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications), `cryptography>=42` (AES-256-GCM encryption).
+Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications), `cryptography>=42` (AES-256-GCM encryption), plus `tomli` on Python 3.10 only (TOML config file parsing; stdlib from 3.11).
 
 | Binary              | Extra needed | Purpose                                      |
 |---------------------|--------------|----------------------------------------------|
@@ -307,7 +307,7 @@ remote_agent_login()          # Returns user_code + verification_uri
 remote_agent_login_status()   # Returns {status: "done", token_saved: true}
 ```
 
-Token stored in `.copilot_agent_token` on the remote machine. The token lookup is relative to the agent process working directory, so launch the agent from a directory that contains (or can access) the token file.
+Token resolution order: the `[copilot].oauth_token` key in the config file (see [Configuration](#configuration)) takes precedence; the legacy `.copilot_agent_token` file on the remote machine is still supported as a fallback. The token lookup for the legacy file is relative to the agent process working directory, so launch the agent from a directory that contains (or can access) the token file.
 
 ## API surface
 
@@ -373,7 +373,7 @@ Constructor parameters: `inner` (required, any `Transport`), `aes_key` (required
 
 | Function | Description |
 |----------|-------------|
-| `build_transport() -> Transport` | Read `CLIPTUNNEL_TRANSPORT` env var and return a `ClipboardTransport` (default) or `HttpsTransport`. If `CLIPTUNNEL_AES_KEY` is set, wraps the transport in `EncryptedTransport`. Raises `ValueError` on missing required env vars or unknown transport. |
+| `build_transport() -> Transport` | Resolve `CLIPTUNNEL_TRANSPORT` (env var, or config file `[transport] type`) and return a `ClipboardTransport` (default) or `HttpsTransport`. If `CLIPTUNNEL_AES_KEY` / `[encryption].aes_key` is set, wraps the transport in `EncryptedTransport`. Raises `ValueError` on missing required settings or unknown transport. Precedence: env var > config file > default. |
 
 ### `crypto` module
 
@@ -427,7 +427,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (375 tests with pytest, 349 with unittest)
+# Run the test suite (395 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -562,8 +562,7 @@ The repeater is a **zero-knowledge relay**: it authenticates peers via bearer to
 
 1. **Deploy a repeater.** Run the repeater service (see below) at a URL the Agent can reach. Deploy behind a TLS proxy (Caddy, Cloudflare, API Gateway).
 
-2. **Configure the Controller.** Set `CLIPTUNNEL_TRANSPORT=https` on the operator machine, along with the repeater URL and a bearer token.
-
+2. **Configure the Controller.** Set the transport to `https` on the operator machine — either via env vars (`CLIPTUNNEL_TRANSPORT=https` plus repeater URL and bearer token) or via a [config file](#configuration) (`[transport] type = "https"`).
 3. **Get install instructions.** Call the `remote_install_instructions` MCP tool from your MCP client. It returns exact env vars and commands for the remote side.
 
 4. **Start the Agent.** On the remote VDI, run `cliptunnel-agent` with the environment variables from the install instructions. The Agent connects outbound to the repeater via HTTPS.
