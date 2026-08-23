@@ -6,7 +6,7 @@ Operate locked-down remote machines through their clipboard, an HTTPS repeater, 
 
 `cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-**v0.8.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, an HTTPS repeater transport for NAT traversal and DLP evasion, and optional AES-256-GCM encryption that works with any transport.
+**v0.9.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, an HTTPS repeater transport for NAT traversal and DLP evasion, a Firebase Realtime Database transport for zero-infrastructure hosting, optional AES-256-GCM encryption that works with any transport, and sanitized transport endpoint reporting in sysinfo.
 
 The package ships four layers:
 
@@ -245,7 +245,7 @@ The server exposes **27 tools** over stdio. All tools accept an optional `remote
 
 | Tool | Description |
 |------|-------------|
-| `remote_sysinfo` | Return system info: OS, Python, CPU, memory, disk, user, shell, agent auth, clipboard backend. |
+| `remote_sysinfo` | Return system info: OS, Python, CPU, memory, disk, user, shell, agent auth, clipboard backend, transport backend, and sanitized transport endpoint. |
 
 ### Remote agent (Copilot)
 
@@ -266,9 +266,9 @@ The server exposes **27 tools** over stdio. All tools accept an optional `remote
 
 | Tool | Description |
 |------|-------------|
-| `remote_connections` | List all connected remotes and controllers with sysinfo, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
-| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard or repeater. |
-| `remote_install_instructions` | Return installation instructions for the remote agent based on the controller's active transport (clipboard or HTTPS). Includes env vars, repeater URL, bearer token, and AES key (if configured). |
+| `remote_connections` | List all connected remotes and controllers with sysinfo, `transport_backend`, `transport_endpoint`, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
+| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard, repeater, or Firebase RTDB. |
+| `remote_install_instructions` | Return installation instructions for the remote agent based on the controller's active transport (clipboard, HTTPS, or Firebase). Includes env vars, repeater URL, bearer token, Firebase URL, and AES key (if configured). |
 
 ## Operations
 
@@ -352,6 +352,7 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 | `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
 | `close()` | Stop the SSE daemon thread. Idempotent. |
 | `backend_name` property | Returns `"https"`. |
+| `endpoint` property | Returns the repeater URL (sanitized, no bearer token). |
 
 Constructor parameters: `repeater_url` (required), `bearer_token` (required), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `poll_timeout`, `request_timeout`.
 
@@ -365,6 +366,7 @@ Constructor parameters: `repeater_url` (required), `bearer_token` (required), `h
 | `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
 | `close()` | Stop the SSE daemon thread. Idempotent. |
 | `backend_name` property | Returns `"firebase"`. |
+| `endpoint` property | Returns the database URL (sanitized, no auth token). |
 
 Constructor parameters: `database_url` (required), `auth_token` (required), `node_path` (default `"cliptunnel"`), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `request_timeout`.
 
@@ -380,6 +382,7 @@ A decorator that wraps any transport with AES-256-GCM encryption. When `CLIPTUNN
 | `wait_for_change(after, timeout) -> int` | Delegates to the inner transport. |
 | `close()` | Close the inner transport. Idempotent. |
 | `backend_name` property | Returns `"encrypted:<inner>"`. |
+| `endpoint` property | Delegates to the inner transport's `endpoint`. |
 
 Constructor parameters: `inner` (required, any `Transport`), `aes_key` (required, 32 bytes).
 
@@ -441,7 +444,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (420 tests with both pytest and unittest)
+# Run the test suite (426 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
