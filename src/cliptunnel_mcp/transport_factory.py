@@ -22,7 +22,7 @@ from cliptunnel_mcp import config
 from cliptunnel_mcp.transport import Transport
 
 __all__ = ["build_transport"]
-_ACCEPTED = {"clipboard", "https", "firebase"}
+_ACCEPTED = {"clipboard", "https", "firebase", "websocket"}
 
 
 def build_transport() -> Transport:
@@ -100,13 +100,41 @@ def build_transport() -> Transport:
             database_url=database_url,
             auth_token=auth_token,
         )
+    elif choice == "websocket":
+        from urllib.parse import urlparse
+
+        ws_url = (config.get_env("CLIPTUNNEL_WS_URL") or "").strip()
+        ws_token = (config.get_env("CLIPTUNNEL_WS_TOKEN") or "").strip()
+
+        ws_missing: list[str] = []
+        if not ws_url:
+            ws_missing.append("CLIPTUNNEL_WS_URL")
+        if not ws_token:
+            ws_missing.append("CLIPTUNNEL_WS_TOKEN")
+        if ws_missing:
+            raise ValueError(
+                "CLIPTUNNEL_TRANSPORT=websocket requires: " + ", ".join(ws_missing)
+            )
+
+        scheme = urlparse(ws_url).scheme.lower()
+        if scheme not in ("ws", "wss"):
+            raise ValueError(
+                "CLIPTUNNEL_WS_URL must use the ws:// or wss:// scheme "
+                f"(got: {ws_url!r})"
+            )
+
+        from cliptunnel_mcp.ws_transport import WebSocketTransport
+
+        transport = WebSocketTransport(
+            ws_url=ws_url,
+            bearer_token=ws_token,
+        )
 
     else:
         raise ValueError(
             f"CLIPTUNNEL_TRANSPORT='{choice}' is not supported. "
             f"Accepted values: {', '.join(sorted(_ACCEPTED))}"
         )
-
     # --- Optional AES encryption layer (works with any transport) ---
     aes_env = config.get_env("CLIPTUNNEL_AES_KEY")
     if aes_env:
