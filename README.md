@@ -13,7 +13,7 @@ The package ships four layers:
 - **Protocol** — CT3 wire format with prefixed endpoint IDs (`C`/`R` + 7 hex), broadcast routing, keepalive pings, announce-based discovery, and typed messages (command, response, error, ack, ping, announce).
 - **Endpoints** — `Controller` (operator side) with a remote + controller registry, and multiple `Agent` instances (remote side), each with a unique prefixed ID. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
 - **MCP server** — a FastMCP application with 27 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, connection listing, announce-based discovery, and remote install instructions.
-- **Transport layer** — clipboard (default, backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) with user-clipboard preservation) or HTTPS repeater (optional, with bearer auth). Both implement the same `Transport` and `RevisionMonitor` protocols — the Controller and Agent are fully transport-agnostic. An optional `EncryptedTransport` decorator adds AES-256-GCM encryption on top of any transport.
+- **Transport layer** — clipboard (default, backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) with user-clipboard preservation), HTTPS repeater (optional, with bearer auth), or Firebase Realtime Database (optional, hosted slot with server timestamps). All implement the same `Transport` and `RevisionMonitor` protocols — the Controller and Agent are fully transport-agnostic. An optional `EncryptedTransport` decorator adds AES-256-GCM encryption on top of any transport.
 
 ## Architecture
 
@@ -209,7 +209,8 @@ from cliptunnel_mcp.operations import dispatch
 agent = Agent(transport=build_transport(), handler=dispatch)
 # Agent generates its own remote_id, registers automatically, and heartbeats every 120s.
 # Disable the heartbeat with heartbeat_secs=0 (or CLIPTUNNEL_HEARTBEAT_SECS=0).
-# Set CLIPTUNNEL_TRANSPORT=https to use the HTTPS repeater instead of the clipboard.
+# Set CLIPTUNNEL_TRANSPORT=https (repeater) or =firebase (Firebase RTDB)
+# to use a network transport instead of the clipboard.
 # Set CLIPTUNNEL_AES_KEY to enable AES-256-GCM encryption on any transport.
 ```
 
@@ -354,6 +355,19 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 
 Constructor parameters: `repeater_url` (required), `bearer_token` (required), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `poll_timeout`, `request_timeout`.
 
+### `FirebaseTransport`
+
+| Method | Description |
+|--------|-------------|
+| `read() -> str` | Return the current cached value (never blocks, never raises). |
+| `write(value: str)` | PUT the node to Firebase RTDB, adopt the server timestamp as revision, notify waiters. Raises `TransportAuthError` on 401/403, `TransportError` on other failures. |
+| `revision` property | Current revision (the node's server timestamp in ms). |
+| `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
+| `close()` | Stop the SSE daemon thread. Idempotent. |
+| `backend_name` property | Returns `"firebase"`. |
+
+Constructor parameters: `database_url` (required), `auth_token` (required), `node_path` (default `"cliptunnel"`), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `request_timeout`.
+
 ### `EncryptedTransport`
 
 A decorator that wraps any transport with AES-256-GCM encryption. When `CLIPTUNNEL_AES_KEY` is set, `build_transport()` automatically wraps the selected transport.
@@ -482,9 +496,11 @@ Full annotated example covering every supported section:
 # ~/.cliptunnel/config.toml
 
 [transport]
-type = "clipboard"                  # "clipboard" (default) or "https"
+type = "clipboard"                  # "clipboard" (default), "https", or "firebase"
 repeater_url = "https://repeater.example.com"   # required when type = "https"
 repeater_token = "agent-bearer-token"           # required when type = "https"
+firebase_url = "https://NAME-default-rtdb.firebaseio.com"  # required when type = "firebase"
+firebase_token = "firebase-auth-token"                     # required when type = "firebase"
 
 [encryption]
 aes_key = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY="  # base64 of 32 bytes; enables AES-256-GCM on any transport
@@ -506,11 +522,11 @@ oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes pr
 
 ### Transport selection (Controller and Agent)
 
-| Variable | Default | Required | Description |
-|----------|---------|----------|-------------|
-| `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard` or `https`. Case-insensitive. |
+| `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard`, `https`, or `firebase`. Case-insensitive. |
 | `CLIPTUNNEL_REPEATER_URL` | — | yes (https) | Repeater URL, e.g. `https://repeater.example.com`. |
 | `CLIPTUNNEL_REPEATER_TOKEN` | — | yes (https) | Bearer token for repeater authentication. |
+| `CLIPTUNNEL_FIREBASE_URL` | — | yes (firebase) | Firebase RTDB base URL, e.g. `https://NAME-default-rtdb.firebaseio.com`. Must use https. |
+| `CLIPTUNNEL_FIREBASE_TOKEN` | — | yes (firebase) | Firebase auth token (sent as `?auth=` query param and bearer header). |
 
 ### Encryption (Controller and Agent)
 
@@ -641,6 +657,25 @@ The `remote_install_instructions` MCP tool returns installation instructions for
 pip install cliptunnel-mcp          # core + clipboard transport + AES encryption (cryptography included)
 pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
 ```
+
+## Firebase transport
+
+When you have no machine to host the HTTPS repeater on, ClipTunnel can use a **Firebase Realtime Database** as the shared slot instead — free tier, no server to deploy, outbound HTTPS only on both sides.
+
+The slot is one JSON node (default path `/cliptunnel`) shaped `{"v": "<wire string>", "r": <server timestamp ms>}`. Writes are REST `PUT`s with `{".sv": "timestamp"}` so Firebase stamps `r` from its server clock — a monotonic revision shared by all writers. Updates stream back over Server-Sent Events, with snapshot resync on reconnect, exactly like the HTTPS transport.
+
+Prefer it over the self-hosted repeater when you want zero infrastructure and can tolerate Google as the host; prefer the repeater when you want the relay to be a zero-knowledge service you control. Note that the database admin can see node contents — AES encryption (`CLIPTUNNEL_AES_KEY`) composes identically here and is strongly recommended, since without it the RTDB stores the CT3 wire string in plaintext.
+
+Configure both sides:
+
+```toml
+[transport]
+type = "firebase"
+firebase_url = "https://NAME-default-rtdb.firebaseio.com"   # https only
+firebase_token = "database-or-oauth-token"
+```
+
+Or via env vars: `CLIPTUNNEL_TRANSPORT=firebase` with `CLIPTUNNEL_FIREBASE_URL` and `CLIPTUNNEL_FIREBASE_TOKEN`. Auth failures (HTTP 401/403) raise `TransportAuthError`; both peers self-heal via the heartbeat.
 
 ## License
 
