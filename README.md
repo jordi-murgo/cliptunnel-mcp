@@ -474,6 +474,8 @@ The config file path resolves as: `--config PATH` CLI flag (on both
 `~/.cliptunnel/config.toml`. A missing config file is not an error — all
 settings simply fall through to the environment/default layers.
 
+Ready-to-edit examples: [`config.toml-example-controller`](config.toml-example-controller) (operator machine) and [`config.toml-example-agent`](config.toml-example-agent) (remote machine). Copy one to `~/.cliptunnel/config.toml`, edit the values, `chmod 600`, and no environment variables are needed.
+
 Full annotated example covering every supported section:
 
 ```toml
