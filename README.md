@@ -461,6 +461,44 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 - **Multi-controller**: multiple controllers are discovered and tracked. With the clipboard transport they share one channel; with the HTTPS transport they share one repeater slot. The protocol is designed for one primary Controller and multiple Agents.
 - **CT3-looking user content**: if the user copies a string starting with `CT3|`, it is treated as protocol traffic and not backed up.
 
+## Configuration
+
+All configuration is via environment variables. There is no config file.
+
+### Transport selection (Controller and Agent)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard` or `https`. Case-insensitive. |
+| `CLIPTUNNEL_REPEATER_URL` | — | yes (https) | Repeater URL, e.g. `https://repeater.example.com`. |
+| `CLIPTUNNEL_REPEATER_TOKEN` | — | yes (https) | Bearer token for repeater authentication. |
+
+### Encryption (Controller and Agent)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLIPTUNNEL_AES_KEY` | — | no | Base64-encoded 32-byte AES-256 key. When set, all CT3 traffic is encrypted with AES-256-GCM via `EncryptedTransport`. Works with any transport. |
+
+### Heartbeat (Agent)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | no | Heartbeat interval in seconds. `<= 0` disables. Works with both transports. |
+
+### Repeater service (repeater only)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `REPEATER_TOKENS` | — | yes | Comma-separated `name:token` pairs, e.g. `ctrl:key1,agent-a:key2`. |
+| `REPEATER_HOST` | `0.0.0.0` | no | Bind address. |
+| `REPEATER_PORT` | `8443` | no | Listen port (behind TLS proxy). |
+
+### Copilot agent (Agent only)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `.copilot_agent_token` | — | no | File in the agent working directory containing the GitHub Copilot token. Created by `remote_agent_login`. |
+
 ## HTTPS repeater transport
 
 When the clipboard channel is unavailable (no shared clipboard across networks), monitored by DLP agents, or you need NAT traversal, ClipTunnel can use an **HTTPS repeater** as an alternative transport. Both the Controller and Agent are outbound HTTPS clients of a small relay service — no inbound ports needed on the remote machine.
