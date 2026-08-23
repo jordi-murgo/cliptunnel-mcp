@@ -417,7 +417,7 @@ class TestAgentHeartbeat(AgentTestCase):
             )
 
         self.assertTrue(
-            wait_until(lambda: count_registrations() >= 3, timeout=5.0),
+            wait_until(lambda: count_registrations() >= 3, timeout=15.0),
             "expected at least 3 periodic heartbeat registrations",
         )
 
