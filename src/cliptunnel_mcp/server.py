@@ -953,4 +953,7 @@ def main() -> None:
     logger.info("Controller wired to %s transport", transport.backend_name)
 
     create_server().run(transport="stdio")
+
+
+if __name__ == "__main__":
     main()
