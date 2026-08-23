@@ -900,6 +900,40 @@ def create_server():
             result["agent_command"] = agent_command
             return json.dumps(result)
 
+        if transport == "firebase":
+            firebase_url = config.get_env("CLIPTUNNEL_FIREBASE_URL", "")
+            firebase_token = config.get_env("CLIPTUNNEL_FIREBASE_TOKEN", "")
+            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+
+            env_vars = {
+                "CLIPTUNNEL_TRANSPORT": "firebase",
+                "CLIPTUNNEL_FIREBASE_URL": firebase_url,
+                "CLIPTUNNEL_FIREBASE_TOKEN": firebase_token,
+            }
+
+            prefix_parts = [
+                "CLIPTUNNEL_TRANSPORT=firebase",
+                f"CLIPTUNNEL_FIREBASE_URL={shlex.quote(firebase_url)}",
+                f"CLIPTUNNEL_FIREBASE_TOKEN={shlex.quote(firebase_token)}",
+            ]
+            pip_command = "pip install cliptunnel-mcp"
+
+            result = {
+                "transport": "firebase",
+                "firebase_url": firebase_url,
+                "firebase_token": firebase_token,
+                "env_vars": env_vars,
+                "pip_command": pip_command,
+            }
+
+            if aes_key_raw:
+                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
+                result["aes_key"] = aes_key_raw
+                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
+
+            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
+            result["agent_command"] = agent_command
+            return json.dumps(result)
         # clipboard (default)
         result = {
             "transport": "clipboard",

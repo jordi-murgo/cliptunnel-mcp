@@ -13,6 +13,7 @@ from unittest import mock
 
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
 from cliptunnel_mcp.encrypted_transport import EncryptedTransport
+from cliptunnel_mcp.firebase_transport import FirebaseTransport
 from cliptunnel_mcp.https_transport import HttpsTransport
 from cliptunnel_mcp.transport_factory import build_transport
 
@@ -221,6 +222,8 @@ class TestConfigFile(unittest.TestCase):
             "CLIPTUNNEL_TRANSPORT",
             "CLIPTUNNEL_REPEATER_URL",
             "CLIPTUNNEL_REPEATER_TOKEN",
+            "CLIPTUNNEL_FIREBASE_URL",
+            "CLIPTUNNEL_FIREBASE_TOKEN",
             "CLIPTUNNEL_AES_KEY",
         ):
             os.environ.pop(name, None)
@@ -256,6 +259,110 @@ class TestConfigFile(unittest.TestCase):
         transport = build_transport()
         self.assertIsInstance(transport, HttpsTransport)
         transport.close()
+
+
+class TestFirebaseConfigFile(unittest.TestCase):
+    """build_transport() must support 'firebase' purely from a config file."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Clear every CLIPTUNNEL_* env var so only the file can supply settings.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in (
+            "CLIPTUNNEL_TRANSPORT",
+            "CLIPTUNNEL_REPEATER_URL",
+            "CLIPTUNNEL_REPEATER_TOKEN",
+            "CLIPTUNNEL_FIREBASE_URL",
+            "CLIPTUNNEL_FIREBASE_TOKEN",
+            "CLIPTUNNEL_AES_KEY",
+        ):
+            os.environ.pop(name, None)
+        self.config_path = os.path.join(self._tmp.name, "config.toml")
+        os.environ["CLIPTUNNEL_CONFIG"] = self.config_path
+
+    def _write(self, content: str) -> None:
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def test_firebase_constructed_from_config_file_and_closed(self) -> None:
+        """Valid firebase settings from the file build FirebaseTransport."""
+        self._write(
+            '[transport]\n'
+            'type = "firebase"\n'
+            'firebase_url = "https://127.0.0.1:1"\n'
+            'firebase_token = "tok"\n'
+        )
+        transport = build_transport()
+        self.assertIsInstance(transport, FirebaseTransport)
+        transport.close()
+
+    def test_firebase_missing_url_raises(self) -> None:
+        self._write(
+            '[transport]\n'
+            'type = "firebase"\n'
+            'firebase_token = "tok"\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            build_transport()
+        self.assertIn("CLIPTUNNEL_FIREBASE_URL", str(ctx.exception))
+
+    def test_firebase_missing_token_raises(self) -> None:
+        self._write(
+            '[transport]\n'
+            'type = "firebase"\n'
+            'firebase_url = "https://127.0.0.1:1"\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            build_transport()
+        self.assertIn("CLIPTUNNEL_FIREBASE_TOKEN", str(ctx.exception))
+
+    def test_firebase_missing_both_names_both(self) -> None:
+        self._write('[transport]\ntype = "firebase"\n')
+        with self.assertRaises(ValueError) as ctx:
+            build_transport()
+        message = str(ctx.exception)
+        self.assertIn("CLIPTUNNEL_FIREBASE_URL", message)
+        self.assertIn("CLIPTUNNEL_FIREBASE_TOKEN", message)
+
+    def test_firebase_rejects_http_url(self) -> None:
+        self._write(
+            '[transport]\n'
+            'type = "firebase"\n'
+            'firebase_url = "http://127.0.0.1:1"\n'
+            'firebase_token = "tok"\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            build_transport()
+        self.assertIn("https scheme", str(ctx.exception))
+
+
+class TestFirebaseEnv(unittest.TestCase):
+    def test_firebase_case_insensitive(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "FIREBASE")
+            env.set("CLIPTUNNEL_FIREBASE_URL", "https://127.0.0.1:1")
+            env.set("CLIPTUNNEL_FIREBASE_TOKEN", "secret")
+            t = build_transport()
+            self.assertIsInstance(t, FirebaseTransport)
+            t.close()
+        finally:
+            env.restore()
+
+    def test_firebase_missing_url_from_env_names_var(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "firebase")
+            env.delete("CLIPTUNNEL_FIREBASE_URL")
+            env.set("CLIPTUNNEL_FIREBASE_TOKEN", "secret")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_FIREBASE_URL", str(ctx.exception))
+        finally:
+            env.restore()
 
 
 if __name__ == "__main__":

@@ -52,6 +52,18 @@ class TestProtocolConformance(unittest.TestCase):
         self.assertEqual(t.backend_name, "https")
         t.close()
 
+    def test_endpoint_returns_sanitized_url(self) -> None:
+        t, _ = make_transport()
+        self.assertEqual(t.endpoint, "http://test")
+        t.close()
+
+    def test_endpoint_excludes_bearer_token(self) -> None:
+        t, _ = make_transport()
+        # endpoint must not contain auth-related query params or headers
+        self.assertNotIn("bearer", (t.endpoint or "").lower())
+        self.assertNotIn("token=", t.endpoint or "")
+        t.close()
+
 
 # ---------------------------------------------------------------------------
 # Read / write

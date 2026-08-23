@@ -396,6 +396,7 @@ class Controller:
             "agent_auth": _detect_agent_auth(),
             # ── Transport backend ──
             "transport_backend": _detect_transport_backend(transport),
+            "transport_endpoint": getattr(transport, "endpoint", None),
             # ── Hardware ──
             "cpu_count": os.cpu_count() or 0,
             "mem_total": _get_mem_total(),

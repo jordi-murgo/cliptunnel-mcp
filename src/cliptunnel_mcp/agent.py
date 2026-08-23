@@ -153,6 +153,8 @@ class Agent:
         self._known_controllers: set[str] = set()
         # Transport backend name for sysinfo reporting.
         self._transport_backend = getattr(transport, "backend_name", None)
+        # Transport endpoint for sysinfo reporting (sanitized, no secrets).
+        self._transport_endpoint = getattr(transport, "endpoint", None)
         self._dispatcher_thread = threading.Thread(
             target=self._response_dispatcher,
             name="cliptunnel-agent-responder",
@@ -202,6 +204,8 @@ class Agent:
         req = {"op": "sysinfo"}
         if self._transport_backend:
             req["_transport_backend"] = self._transport_backend
+        if self._transport_endpoint:
+            req["_transport_endpoint"] = self._transport_endpoint
         sysinfo_result, _ = dispatch(json.dumps(req))
         targets = self._known_controllers if controller_id is None else {controller_id}
         if not targets:

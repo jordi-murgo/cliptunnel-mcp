@@ -17,6 +17,12 @@
 # ---------------------------------------------------------------------------
 # Transport — must MATCH the Controller's [transport] type, and use values
 # issued for THIS agent (each agent should have its own bearer token).
+#
+# Supported types: "clipboard" (default), "https", or "firebase".
+# For firebase, use firebase_url / firebase_token instead of the
+# repeater keys:
+#   firebase_url = "https://NAME-default-rtdb.firebaseio.com"  # https only
+#   firebase_token = "firebase-auth-token"
 # ---------------------------------------------------------------------------
 [transport]
 type = "https"

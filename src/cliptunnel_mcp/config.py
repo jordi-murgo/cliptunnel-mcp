@@ -59,6 +59,8 @@ ENV_TO_FILE: dict[str, tuple[tuple[str, ...], str]] = {
     "CLIPTUNNEL_TRANSPORT": (("transport",), "type"),
     "CLIPTUNNEL_REPEATER_URL": (("transport",), "repeater_url"),
     "CLIPTUNNEL_REPEATER_TOKEN": (("transport",), "repeater_token"),
+    "CLIPTUNNEL_FIREBASE_URL": (("transport",), "firebase_url"),
+    "CLIPTUNNEL_FIREBASE_TOKEN": (("transport",), "firebase_token"),
     "CLIPTUNNEL_AES_KEY": (("encryption",), "aes_key"),
     "CLIPTUNNEL_HEARTBEAT_SECS": (("heartbeat",), "interval_secs"),
 }
