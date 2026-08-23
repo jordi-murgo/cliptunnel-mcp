@@ -379,6 +379,11 @@ class FirebaseTransport:
     def backend_name(self) -> str:
         return "firebase"
 
+    @property
+    def endpoint(self) -> str | None:
+        """Sanitized transport endpoint for sysinfo (no auth token)."""
+        return self._database_url
+
     def close(self) -> None:
         """Stop the SSE thread and close any open stream. Idempotent."""
         self._running = False

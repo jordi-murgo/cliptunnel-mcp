@@ -412,6 +412,11 @@ class HttpsTransport:
     def backend_name(self) -> str:
         return "https"
 
+    @property
+    def endpoint(self) -> str | None:
+        """Sanitized transport endpoint for sysinfo (no bearer token)."""
+        return self._repeater_url
+
     def close(self) -> None:
         """Stop the SSE thread and close any open stream. Idempotent."""
         self._running = False

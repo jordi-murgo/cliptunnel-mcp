@@ -80,6 +80,18 @@ class TestProtocolConformance(unittest.TestCase):
         self.assertEqual(t.backend_name, "firebase")
         t.close()
 
+    def test_endpoint_returns_sanitized_url(self) -> None:
+        t, _ = make_transport()
+        self.assertEqual(t.endpoint, _DB)
+        t.close()
+
+    def test_endpoint_excludes_auth_token(self) -> None:
+        t, _ = make_transport()
+        # endpoint must not contain the Firebase auth query parameter
+        self.assertNotIn("auth=", t.endpoint or "")
+        self.assertNotIn("token", (t.endpoint or "").lower())
+        t.close()
+
 
 # ---------------------------------------------------------------------------
 # Read / write
@@ -314,6 +326,14 @@ class TestAESComposition(unittest.TestCase):
             self.assertNotIn("secret-payload", fake.value)
             self.assertEqual(et.read(), "secret-payload")
             self.assertEqual(et.backend_name, "encrypted:firebase")
+        finally:
+            et.close()
+
+    def test_endpoint_delegates_to_inner(self) -> None:
+        inner, _ = make_transport()
+        et = EncryptedTransport(inner, os.urandom(32))
+        try:
+            self.assertEqual(et.endpoint, _DB)
         finally:
             et.close()
 

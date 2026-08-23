@@ -354,6 +354,12 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
         except Exception:
             info["transport_backend"] = "unknown"
 
+    # ── Transport endpoint ──────────────────────────────────────────
+    # Sanitized endpoint URL injected by the Agent (no secrets).
+    transport_endpoint = req.get("_transport_endpoint")
+    if transport_endpoint:
+        info["transport_endpoint"] = transport_endpoint
+
     # ── CPU ─────────────────────────────────────────────────────────
     info["cpu_count"] = os.cpu_count() or 0
 
