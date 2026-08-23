@@ -100,6 +100,7 @@ class TestLoadConfig(ConfigTestCase):
 
 
 class TestPermissionWarning(ConfigTestCase):
+    @unittest.skipUnless(os.name == "posix", "permission bits are POSIX-only; Windows always reports 0o666")
     def test_group_world_readable_warns(self) -> None:
         path = self.write_config(_FULL_TOML)
         os.chmod(path, 0o644)
@@ -109,6 +110,7 @@ class TestPermissionWarning(ConfigTestCase):
         self.assertIn("chmod 600", joined)
         self.assertIn(path, joined)
 
+    @unittest.skipUnless(os.name == "posix", "permission bits are POSIX-only; Windows always reports 0o666")
     def test_owner_only_does_not_warn(self) -> None:
         path = self.write_config(_FULL_TOML)
         os.chmod(path, 0o600)

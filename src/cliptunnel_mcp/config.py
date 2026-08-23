@@ -122,6 +122,14 @@ def load_config(path: str | None = None, *, force_reload: bool = False) -> dict:
 
 
 def _warn_if_group_readable(path: str) -> None:
+    """Warn when a POSIX config file is readable by group/others.
+
+    Skipped on Windows: ``st_mode`` there does not reflect POSIX permission
+    bits (files always report ``0o666`` regardless of ACLs), so the check
+    would warn on every file. Windows enforces access via ACLs instead.
+    """
+    if os.name != "posix":
+        return
     mode = os.stat(path).st_mode
     if mode & 0o077:
         logger.warning(
