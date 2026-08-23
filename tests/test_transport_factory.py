@@ -15,8 +15,25 @@ from cliptunnel_mcp.https_transport import HttpsTransport
 from cliptunnel_mcp.transport_factory import build_transport
 
 
+def _clipboard_available() -> bool:
+    """True if a real ClipboardTransport can be constructed on this host.
+
+    Headless Linux CI runners have no clipboard backend, so clipboard
+    transport tests must be skipped there."""
+    try:
+        from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+
+        t = ClipboardTransport()
+        t.close()
+        return True
+    except Exception:
+        return False
+
+
+_CLIPBOARD_OK = _clipboard_available()
+
+
 class _EnvGuard:
-    """Save/restore os.environ for a test scope."""
 
     def __init__(self) -> None:
         self._saved: dict[str, str] = {}
@@ -39,6 +56,7 @@ class _EnvGuard:
 
 
 class TestDefaults(unittest.TestCase):
+    @unittest.skipUnless(_CLIPBOARD_OK, "clipboard backend not available on this host")
     def test_no_env_returns_clipboard(self) -> None:
         env = _EnvGuard()
         try:
@@ -49,6 +67,7 @@ class TestDefaults(unittest.TestCase):
         finally:
             env.restore()
 
+    @unittest.skipUnless(_CLIPBOARD_OK, "clipboard backend not available on this host")
     def test_explicit_clipboard(self) -> None:
         env = _EnvGuard()
         try:
