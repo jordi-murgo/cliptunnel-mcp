@@ -29,17 +29,20 @@ type = "https"
 repeater_url = "https://repeater.example.com"     # must use https://
 repeater_token = "change-me-controller-bearer-token"
 
-# ---------------------------------------------------------------------------
 # Optional AES-256-GCM encryption — works with ANY transport.
 # All CT3 traffic is encrypted end-to-end; with HTTPS the repeater never
 # sees plaintext; with clipboard the pasteboard never shows readable data.
 #
-# Generate: python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
-# Use the SAME key on the Controller and every Agent.
-# Remove this section (or leave it commented) to disable encryption.
+# Generate a key (either one-liner works):
+#
+#   python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+#   openssl rand -base64 32
+#
+# Paste the output below as-is. Use the SAME key on the Controller and
+# every Agent. Remove this section to disable encryption.
 # ---------------------------------------------------------------------------
 [encryption]
-aes_key = "base64-encoded-32-byte-aes-key-here="
+aes_key = "REPLACE-WITH-GENERATED-KEY-44-BASE64-CHARS"
 
 # NOTE: [heartbeat] does not apply to the Controller (it is agent-side),
 # and [copilot] only applies to Agents running autonomous Copilot sessions.

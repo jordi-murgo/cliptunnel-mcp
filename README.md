@@ -588,6 +588,8 @@ Generate a key:
 
 ```bash
 python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+# or, equivalently:
+openssl rand -base64 32
 ```
 
 Set it on both the Controller and the Agent (out-of-band, not over the channel):

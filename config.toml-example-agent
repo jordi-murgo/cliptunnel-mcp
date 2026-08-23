@@ -25,9 +25,16 @@ repeater_token = "change-me-agent-bearer-token"   # this agent's own token
 
 # ---------------------------------------------------------------------------
 # Optional AES-256-GCM encryption — MUST use the SAME key as the Controller.
+#
+# Generate a key (either one-liner works):
+#
+#   python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+#   openssl rand -base64 32
+#
+# Paste the output below as-is. It must be identical on both sides.
 # ---------------------------------------------------------------------------
 [encryption]
-aes_key = "base64-encoded-32-byte-aes-key-here="
+aes_key = "REPLACE-WITH-GENERATED-KEY-44-BASE64-CHARS"
 
 # ---------------------------------------------------------------------------
 # Agent heartbeat — keeps the Controller's roster self-healing.
