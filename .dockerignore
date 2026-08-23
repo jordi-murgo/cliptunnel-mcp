@@ -1,0 +1,14 @@
+# Exclude files not needed in the repeater image.
+.git
+.github
+openspec
+tests
+deploy
+*.pyc
+__pycache__
+.venv
+.env
+*.egg-info
+dist
+build
+.ruff_cache

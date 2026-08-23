@@ -1,0 +1,48 @@
+# cliptunnel-mcp — EXAMPLE CONFIGURATION: CONTROLLER (operator machine)
+#
+# Usage:
+#   cp config.toml-example-controller ~/.cliptunnel/config.toml
+#   chmod 600 ~/.cliptunnel/config.toml
+#   edit values, then just run `cliptunnel-mcp` — no env vars needed.
+#
+# Non-default file location:
+#   cliptunnel-mcp --config /path/to/config.toml
+#   (or export CLIPTUNNEL_CONFIG=/path/to/config.toml)
+#
+# Precedence: environment variable > this file > built-in default.
+#
+# SECURITY: this file contains secrets. Keep it user-readable only
+# (chmod 600). The loader logs a warning if group/world-readable.
+
+# ---------------------------------------------------------------------------
+# Transport — "clipboard" (default) or "https".
+#
+# CLIPBOARD: Controller and Agent must share the same OS clipboard
+#   (same machine, or a VDI session with clipboard redirection).
+#   No extra settings needed below.
+#
+# HTTPS: Controller and Agent are outbound clients of your repeater.
+#   Deploy one first — see deploy/README.md.
+# ---------------------------------------------------------------------------
+[transport]
+type = "https"
+repeater_url = "https://repeater.example.com"     # must use https://
+repeater_token = "change-me-controller-bearer-token"
+
+# Optional AES-256-GCM encryption — works with ANY transport.
+# All CT3 traffic is encrypted end-to-end; with HTTPS the repeater never
+# sees plaintext; with clipboard the pasteboard never shows readable data.
+#
+# Generate a key (either one-liner works):
+#
+#   python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+#   openssl rand -base64 32
+#
+# Paste the output below as-is. Use the SAME key on the Controller and
+# every Agent. Remove this section to disable encryption.
+# ---------------------------------------------------------------------------
+[encryption]
+aes_key = "REPLACE-WITH-GENERATED-KEY-44-BASE64-CHARS"
+
+# NOTE: [heartbeat] does not apply to the Controller (it is agent-side),
+# and [copilot] only applies to Agents running autonomous Copilot sessions.

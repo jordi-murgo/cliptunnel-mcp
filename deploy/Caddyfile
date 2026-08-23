@@ -1,0 +1,33 @@
+# Caddyfile — automatic HTTPS reverse proxy for the cliptunnel-mcp repeater.
+#
+# Usage:
+#   1. Replace `repeater.example.com` with your domain.
+#   2. Point your domain's DNS A/AAAA record to this server's IP.
+#   3. Run: docker compose up -d
+#
+# Caddy automatically provisions and renews Let's Encrypt certificates.
+# The repeater itself listens on plain HTTP (port 8443) inside the container;
+# Caddy terminates TLS and proxies to it.
+
+repeater.example.com {
+    reverse_proxy repeater:8443 {
+        # SSE support: long-lived connections, no buffering.
+        flush_interval -1
+        transport http {
+            read_timeout 300s
+            write_timeout 300s
+        }
+    }
+
+    # Security headers.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+    }
+
+    # Log to stdout (docker logs).
+    log {
+        output stdout
+        format json
+    }
+}

@@ -21,7 +21,12 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.operations import dispatch
 
-__version__ = "0.7.0"
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("cliptunnel-mcp")
+except PackageNotFoundError:  # package not installed (e.g. running from source)
+    __version__ = "0.0.0.dev0"
 
 __all__ = [
     "BROADCAST_ADDR",

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliptunnel-mcp"
-version = "0.7.0"
-description = "Operate a locked-down remote machine through its clipboard"
+version = "0.8.0"
+description = "Operate locked-down remote machines through their clipboard or an HTTPS repeater"
 authors = [
     { name = "Jordi Murgó", email = "jordi.murgo@gmail.com" },
 ]
@@ -15,9 +15,13 @@ maintainers = [
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["mcp", "clipboard", "tunnel", "remote", "agent", "controller", "citrix"]
+keywords = ["mcp", "clipboard", "tunnel", "remote", "agent", "controller", "citrix", "vdi", "repeater", "dlp"]
 requires-python = ">=3.10"
-dependencies = ["clipboard-event>=0.2.0"]
+dependencies = [
+    "clipboard-event>=0.2.0",
+    "cryptography>=42",
+    'tomli>=1.1.0; python_version < "3.11"',
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -30,6 +34,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Typing :: Typed",
 ]
 

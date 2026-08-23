@@ -40,6 +40,8 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.transport import Transport
 
+from cliptunnel_mcp import config
+
 
 logger = logging.getLogger("cliptunnel-agent")
 
@@ -51,14 +53,16 @@ _HEARTBEAT_JITTER_SECS = 15.0
 
 
 def _resolve_heartbeat_secs(explicit: float | None) -> float:
-    """Resolve the heartbeat interval: explicit arg, then env var, then default.
+    """Resolve the heartbeat interval: explicit arg, then env var or config
+    file, then default.
 
-    A malformed env value falls back to the default. Values <= 0 disable the
-    heartbeat entirely.
+    Precedence: ``heartbeat_secs`` argument > ``CLIPTUNNEL_HEARTBEAT_SECS``
+    env var > ``[heartbeat] interval_secs`` in the config file > default
+    the heartbeat entirely.
     """
     if explicit is not None:
         return float(explicit)
-    raw = os.environ.get(HEARTBEAT_ENV_VAR, "").strip()
+    raw = (config.get_env(HEARTBEAT_ENV_VAR) or "").strip()
     if raw:
         try:
             return float(raw)
@@ -468,6 +472,9 @@ def main() -> None:
     as the command handler, then blocks until interrupted.
 
     Use ``--verbose`` or ``-v`` to enable DEBUG-level logging (ACKs, retransmits).
+    Use ``--config PATH`` to point at a non-default TOML config file
+    (default: ``~/.cliptunnel/config.toml``, also overridable via the
+    ``CLIPTUNNEL_CONFIG`` environment variable).
     """
     import argparse
     import logging
@@ -479,7 +486,18 @@ def main() -> None:
         "-v", "--verbose", action="store_true",
         help="enable DEBUG-level logging (ACKs, retransmits, slot writes)",
     )
+    parser.add_argument(
+        "--config", metavar="PATH", default=None,
+        help=(
+            "path to the TOML config file "
+            f"(default: {config.DEFAULT_CONFIG_PATH}, "
+            "overridable via CLIPTUNNEL_CONFIG)"
+        ),
+    )
     args = parser.parse_args()
+
+    # Apply the --config override before anything resolves settings.
+    config.set_config_path(args.config)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -488,10 +506,10 @@ def main() -> None:
     )
     logger = logging.getLogger("cliptunnel-agent")
 
-    from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+    from cliptunnel_mcp.transport_factory import build_transport
     from cliptunnel_mcp.operations import dispatch as handler
-    transport = ClipboardTransport()
-    logger.info("starting agent on local OS clipboard")
+    transport = build_transport()
+    logger.info("starting agent on %s transport", transport.backend_name)
     agent = Agent(transport, handler)
     logger.info("agent running — remote_id=%s — press Ctrl+C to stop", agent.remote_id)
 

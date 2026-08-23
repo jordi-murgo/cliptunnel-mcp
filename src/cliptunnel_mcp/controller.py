@@ -107,8 +107,12 @@ def _detect_shell_version() -> str:
 
 
 def _detect_agent_auth() -> str:
-    """Check if the agent token file exists and is non-empty."""
+    """Check if a Copilot OAuth token is available (config file or legacy file)."""
     try:
+        from cliptunnel_mcp.config import get_copilot_token
+
+        if get_copilot_token():
+            return "authenticated"
         token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
         if os.path.isfile(token_path):
             with open(token_path, "r") as f:
