@@ -74,6 +74,24 @@ class _FirebaseHttpClient(_UrllibHttpClient):
         except (urllib.error.URLError, OSError) as exc:
             raise TransportError(f"PUT {url} failed: {exc}") from exc
 
+    def open_stream(self, url: str, headers: dict[str, str]) -> StreamResponse:
+        """Override to map both 401 and 403 to TransportAuthError.
+
+        Firebase returns 403 for insufficient database permissions or
+        invalid tokens; the inherited client maps only 401.
+        """
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            resp = urllib.request.urlopen(req, timeout=60.0)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise TransportAuthError(
+                    f"GET {url} returned {exc.code}: {exc.read().decode('utf-8')}"
+                ) from exc
+            raise TransportError(f"GET {url} failed: {exc.code}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise TransportError(f"GET {url} stream failed: {exc}") from exc
+        return resp  # type: ignore[return-value]
 
 class FirebaseTransport:
     """Transport + RevisionMonitor backed by a Firebase Realtime Database.
@@ -120,7 +138,7 @@ class FirebaseTransport:
         self._condition = threading.Condition()
         self._value: str = ""
         self._revision: int = 0
-
+        self._event_seq: int = 0  # strictly-increasing local counter; survives same-ms timestamps
         self._running = True
         self._sse_response: StreamResponse | None = None
         self._sse_thread = threading.Thread(
@@ -134,7 +152,9 @@ class FirebaseTransport:
 
     def _node_url(self) -> str:
         """Node URL with the auth token in the query string (RTDB style)."""
-        return f"{self._database_url}/{self._node_path}.json?auth={self._auth_token}"
+        from urllib.parse import quote
+
+        return f"{self._database_url}/{self._node_path}.json?auth={quote(self._auth_token, safe='')}"
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._auth_token}"}
@@ -184,7 +204,8 @@ class FirebaseTransport:
 
         with self._condition:
             self._value = value  # optimistic: store plaintext
-            self._revision = max(self._revision + 1, remote_rev)
+            self._event_seq += 1
+            self._revision = max(self._revision + 1, remote_rev, self._event_seq)
             self._condition.notify_all()
 
     # ------------------------------------------------------------------
@@ -297,8 +318,13 @@ class FirebaseTransport:
         with self._condition:
             if isinstance(value, str):
                 self._value = value
+            self._event_seq += 1
             if isinstance(revision, int):
-                self._revision = max(self._revision, revision)
+                # Guarantee strict monotonicity: if the server timestamp
+                # didn't advance (same-ms writes), fall back to event_seq.
+                self._revision = max(self._revision + 1, revision, self._event_seq)
+            else:
+                self._revision = max(self._revision + 1, self._event_seq)
             self._condition.notify_all()
 
     # ------------------------------------------------------------------
@@ -338,8 +364,11 @@ class FirebaseTransport:
         with self._condition:
             if isinstance(snapshot_value, str):
                 self._value = snapshot_value
+            self._event_seq += 1
             if isinstance(snapshot_revision, int):
-                self._revision = max(self._revision, snapshot_revision)
+                self._revision = max(self._revision + 1, snapshot_revision, self._event_seq)
+            else:
+                self._revision = max(self._revision + 1, self._event_seq)
             self._condition.notify_all()
 
     # ------------------------------------------------------------------

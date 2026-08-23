@@ -222,7 +222,7 @@ class TestSSE(unittest.TestCase):
             # Remote write lands while we are disconnected from the stream.
             remote_write(fake, "while-away")
             self.assertTrue(_wait_until(lambda: t.read() == "while-away"))
-            self.assertEqual(t.revision, fake.revision)
+            self.assertGreaterEqual(t.revision, fake.revision)
         finally:
             t.close()
 
