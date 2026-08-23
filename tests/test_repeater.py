@@ -1,20 +1,18 @@
-"""Tests for the repeater service — T5 (RED first).
+"""Tests for the repeater service — T5.
 
-RepeaterState: slot_value, revision, subscribers, threading.Lock, tokens.
-make_handler(state) → BaseHTTPRequestHandler subclass.
-do_GET routes /slot (snapshot JSON) and /slot/events (SSE stream).
-do_POST routes /slot (write). Bearer auth. RepeaterServer(ThreadingHTTPServer).
+Converted to unittest.TestCase so the CI runner (unittest discover) can
+discover and run these tests without pytest installed.
 """
 from __future__ import annotations
 
 import json
 import threading
 import time
+import unittest
 import urllib.error
 import urllib.request
 
-import pytest
-
+from cliptunnel_mcp.repeater.server import make_handler, RepeaterServer
 from cliptunnel_mcp.repeater.state import RepeaterState
 
 
@@ -23,32 +21,32 @@ from cliptunnel_mcp.repeater.state import RepeaterState
 # ---------------------------------------------------------------------------
 
 
-class TestRepeaterState:
+class TestRepeaterState(unittest.TestCase):
     def test_write_stores_value_and_bumps_revision(self):
         s = RepeaterState()
         rev = s.write("hello")
-        assert rev == 1
-        assert s.value == "hello"
-        assert s.revision == 1
+        self.assertEqual(rev, 1)
+        self.assertEqual(s.value, "hello")
+        self.assertEqual(s.revision, 1)
 
     def test_snapshot_returns_value_and_revision(self):
         s = RepeaterState()
         s.write("data")
         val, rev = s.snapshot()
-        assert val == "data"
-        assert rev == 1
+        self.assertEqual(val, "data")
+        self.assertEqual(rev, 1)
 
     def test_multiple_writes_increment(self):
         s = RepeaterState()
         s.write("a")
         s.write("b")
         s.write("c")
-        assert s.revision == 3
+        self.assertEqual(s.revision, 3)
 
     def test_add_remove_subscriber(self):
         s = RepeaterState()
         q = s.add_subscriber()
-        assert q is not None
+        self.assertIsNotNone(q)
         s.remove_subscriber(q)
 
     def test_write_pushes_to_subscribers(self):
@@ -56,18 +54,16 @@ class TestRepeaterState:
         q = s.add_subscriber()
         s.write("pushed")
         event = q.get(timeout=1.0)
-        assert "write" in event
-        assert "pushed" in event
+        self.assertIn("write", event)
+        self.assertIn("pushed", event)
 
     def test_full_queue_drops_event(self):
         s = RepeaterState(maxsize=2)
         q = s.add_subscriber()
         s.write("a")
         s.write("b")
-        # Queue should be full; next write drops — must not block.
-        s.write("c")
-        # The queue has at most 2 items.
-        assert q.qsize() <= 2
+        s.write("c")  # should not block
+        self.assertLessEqual(q.qsize(), 2)
 
     def test_concurrent_writes_serialize(self):
         s = RepeaterState()
@@ -81,93 +77,99 @@ class TestRepeaterState:
             t.start()
         for t in threads:
             t.join()
-        assert s.revision == 200  # 4 * 50
+        self.assertEqual(s.revision, 200)  # 4 * 50
 
 
 # ---------------------------------------------------------------------------
 # HTTP handler tests (in-process ThreadingHTTPServer)
 # ---------------------------------------------------------------------------
 
-from cliptunnel_mcp.repeater.server import make_handler, RepeaterServer  # noqa: E402
 
+class TestRepeaterHTTP(unittest.TestCase):
+    """Tests using a real in-process ThreadingHTTPServer."""
 
-class TestRepeaterHTTP:
-    @pytest.fixture
-    def server(self):
-        state = RepeaterState(tokens=["test-token"])
-        handler = make_handler(state)
-        srv = RepeaterServer(("127.0.0.1", 0), handler)
-        port = srv.server_address[1]
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        yield f"http://127.0.0.1:{port}"
-        srv.shutdown()
+    def setUp(self) -> None:
+        self._state = RepeaterState(tokens=["test-token"])
+        handler = make_handler(self._state)
+        self._srv = RepeaterServer(("127.0.0.1", 0), handler)
+        self._port = self._srv.server_address[1]
+        self._thread = threading.Thread(
+            target=self._srv.serve_forever, daemon=True
+        )
+        self._thread.start()
 
-    def test_post_slot_valid_token(self, server):
+    def tearDown(self) -> None:
+        self._srv.shutdown()
+
+    @property
+    def _url(self) -> str:
+        return f"http://127.0.0.1:{self._port}"
+
+    def test_post_slot_valid_token(self):
         req = urllib.request.Request(
-            f"{server}/slot",
+            f"{self._url}/slot",
             data=b"hello",
             headers={"Authorization": "Bearer test-token", "Content-Type": "text/plain"},
             method="POST",
         )
         resp = urllib.request.urlopen(req, timeout=5)
-        assert resp.status == 200
+        self.assertEqual(resp.status, 200)
         data = json.loads(resp.read())
-        assert data["revision"] == 1
+        self.assertEqual(data["revision"], 1)
 
-    def test_post_slot_invalid_token(self, server):
+    def test_post_slot_invalid_token(self):
         req = urllib.request.Request(
-            f"{server}/slot",
+            f"{self._url}/slot",
             data=b"hello",
             headers={"Authorization": "Bearer wrong"},
             method="POST",
         )
-        with pytest.raises(urllib.error.HTTPError) as exc:
+        with self.assertRaises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req, timeout=5)
-        assert exc.value.code == 401
+        self.assertEqual(exc.exception.code, 401)
 
-    def test_post_slot_missing_auth(self, server):
+    def test_post_slot_missing_auth(self):
         req = urllib.request.Request(
-            f"{server}/slot", data=b"hello", method="POST",
+            f"{self._url}/slot", data=b"hello", method="POST",
         )
-        with pytest.raises(urllib.error.HTTPError) as exc:
+        with self.assertRaises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req, timeout=5)
-        assert exc.value.code == 401
+        self.assertEqual(exc.exception.code, 401)
 
-    def test_get_slot_valid_token(self, server):
+    def test_get_slot_valid_token(self):
         # First write
         req = urllib.request.Request(
-            f"{server}/slot", data=b"snapshot-test",
+            f"{self._url}/slot", data=b"snapshot-test",
             headers={"Authorization": "Bearer test-token"},
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
         # Then snapshot
         req2 = urllib.request.Request(
-            f"{server}/slot",
+            f"{self._url}/slot",
             headers={"Authorization": "Bearer test-token"},
         )
         resp = urllib.request.urlopen(req2, timeout=5)
         data = json.loads(resp.read())
-        assert data["value"] == "snapshot-test"
-        assert data["revision"] == 1
+        self.assertEqual(data["value"], "snapshot-test")
+        self.assertEqual(data["revision"], 1)
 
-    def test_get_slot_invalid_token(self, server):
+    def test_get_slot_invalid_token(self):
         req = urllib.request.Request(
-            f"{server}/slot",
+            f"{self._url}/slot",
             headers={"Authorization": "Bearer wrong"},
         )
-        with pytest.raises(urllib.error.HTTPError) as exc:
+        with self.assertRaises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req, timeout=5)
-        assert exc.value.code == 401
+        self.assertEqual(exc.exception.code, 401)
 
-    def test_sse_receives_write_events(self, server):
+    def test_sse_receives_write_events(self):
         events: list[str] = []
 
         def sse_reader() -> None:
             try:
                 req = urllib.request.Request(
-                    f"{server}/slot/events",
+                    f"{self._url}/slot/events",
                     headers={"Authorization": "Bearer test-token", "Accept": "text/event-stream"},
                 )
                 resp = urllib.request.urlopen(req, timeout=10)
@@ -183,24 +185,24 @@ class TestRepeaterHTTP:
         time.sleep(0.3)  # let SSE connect
         # POST a write
         req = urllib.request.Request(
-            f"{server}/slot", data=b"sse-payload",
+            f"{self._url}/slot", data=b"sse-payload",
             headers={"Authorization": "Bearer test-token"},
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
         t.join(timeout=5)
         joined = "\n".join(events)
-        assert "event: write" in joined
-        assert "sse-payload" in joined
+        self.assertIn("event: write", joined)
+        self.assertIn("sse-payload", joined)
 
-    def test_sse_invalid_token_401(self, server):
+    def test_sse_invalid_token_401(self):
         req = urllib.request.Request(
-            f"{server}/slot/events",
+            f"{self._url}/slot/events",
             headers={"Authorization": "Bearer wrong"},
         )
-        with pytest.raises(urllib.error.HTTPError) as exc:
+        with self.assertRaises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req, timeout=5)
-        assert exc.value.code == 401
+        self.assertEqual(exc.exception.code, 401)
 
     def test_empty_tokens_refuses_all(self):
         state = RepeaterState(tokens=[])  # empty = refuse all
@@ -214,8 +216,12 @@ class TestRepeaterHTTP:
                 f"http://127.0.0.1:{port}/slot",
                 headers={"Authorization": "Bearer anything"},
             )
-            with pytest.raises(urllib.error.HTTPError) as exc:
+            with self.assertRaises(urllib.error.HTTPError) as exc:
                 urllib.request.urlopen(req, timeout=5)
-            assert exc.value.code == 401
+            self.assertEqual(exc.exception.code, 401)
         finally:
             srv.shutdown()
+
+
+if __name__ == "__main__":
+    unittest.main()

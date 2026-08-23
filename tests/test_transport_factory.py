@@ -1,103 +1,178 @@
-"""Tests for build_transport() factory — T4 (RED first).
+"""Tests for build_transport() factory — T4.
 
-Reads CLIPTUNNEL_TRANSPORT (default clipboard, case-insensitive).
-clipboard → ClipboardTransport (lazy import).
-https → HttpsTransport (lazy import, validates URL + TOKEN, parses AES_KEY).
-Unknown → ValueError.
+Converted to unittest.TestCase so the CI runner (unittest discover) can
+discover and run these tests without pytest installed.
 """
 from __future__ import annotations
 
 import base64
-
-import pytest
+import os
+import unittest
 
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
-from cliptunnel_mcp.https_transport import HttpsTransport
 from cliptunnel_mcp.encrypted_transport import EncryptedTransport
+from cliptunnel_mcp.https_transport import HttpsTransport
 from cliptunnel_mcp.transport_factory import build_transport
 
-class TestDefaults:
-    def test_no_env_returns_clipboard(self, monkeypatch):
-        monkeypatch.delenv("CLIPTUNNEL_TRANSPORT", raising=False)
-        t = build_transport()
-        assert isinstance(t, ClipboardTransport)
-        t.close()
 
-    def test_explicit_clipboard(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "clipboard")
-        t = build_transport()
-        assert isinstance(t, ClipboardTransport)
-        t.close()
+class _EnvGuard:
+    """Save/restore os.environ for a test scope."""
 
+    def __init__(self) -> None:
+        self._saved: dict[str, str] = {}
 
-class TestHttps:
-    def test_https_returns_https_transport(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-        t = build_transport()
-        assert isinstance(t, HttpsTransport)
-        t.close()
+    def set(self, key: str, value: str) -> None:
+        if key not in self._saved:
+            self._saved[key] = os.environ.get(key, "")
+        os.environ[key] = value
 
-    def test_https_missing_url_raises(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.delenv("CLIPTUNNEL_REPEATER_URL", raising=False)
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-        with pytest.raises(ValueError, match="CLIPTUNNEL_REPEATER_URL"):
-            build_transport()
+    def delete(self, key: str) -> None:
+        if key not in self._saved:
+            self._saved[key] = os.environ.get(key, "")
+        os.environ.pop(key, None)
 
-    def test_https_missing_token_raises(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-        monkeypatch.delenv("CLIPTUNNEL_REPEATER_TOKEN", raising=False)
-        with pytest.raises(ValueError, match="CLIPTUNNEL_REPEATER_TOKEN"):
-            build_transport()
-
-    def test_https_missing_both_raises(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.delenv("CLIPTUNNEL_REPEATER_URL", raising=False)
-        monkeypatch.delenv("CLIPTUNNEL_REPEATER_TOKEN", raising=False)
-        with pytest.raises(ValueError, match="CLIPTUNNEL_REPEATER_URL"):
-            build_transport()
-
-    def test_https_case_insensitive(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "HTTPS")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-        t = build_transport()
-        assert isinstance(t, HttpsTransport)
-        t.close()
+    def restore(self) -> None:
+        for key, value in self._saved.items():
+            if value == "" and key not in os.environ:
+                continue
+            os.environ[key] = value
 
 
-class TestAESKey:
-    def test_valid_aes_key(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-        monkeypatch.setenv("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 32).decode())
-        t = build_transport()
-        assert isinstance(t, EncryptedTransport)
-        t.close()
+class TestDefaults(unittest.TestCase):
+    def test_no_env_returns_clipboard(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.delete("CLIPTUNNEL_TRANSPORT")
+            t = build_transport()
+            self.assertIsInstance(t, ClipboardTransport)
+            t.close()
+        finally:
+            env.restore()
 
-    def test_wrong_length_aes_key_raises(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-        monkeypatch.setenv("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 16).decode())
-        with pytest.raises(ValueError, match="32 bytes"):
-            build_transport()
-
-    def test_bad_base64_aes_key_raises(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "https")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-        monkeypatch.setenv("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-        monkeypatch.setenv("CLIPTUNNEL_AES_KEY", "!!!not-base64!!!")
-        with pytest.raises(ValueError):
-            build_transport()
+    def test_explicit_clipboard(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "clipboard")
+            t = build_transport()
+            self.assertIsInstance(t, ClipboardTransport)
+            t.close()
+        finally:
+            env.restore()
 
 
-class TestUnknown:
-    def test_unknown_transport_raises(self, monkeypatch):
-        monkeypatch.setenv("CLIPTUNNEL_TRANSPORT", "carrier-pigeon")
-        with pytest.raises(ValueError, match="not supported"):
-            build_transport()
+class TestHttps(unittest.TestCase):
+    def test_https_returns_encrypted_or_plain(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            t = build_transport()
+            self.assertIsInstance(t, HttpsTransport)
+            t.close()
+        finally:
+            env.restore()
+
+    def test_https_missing_url_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.delete("CLIPTUNNEL_REPEATER_URL")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_REPEATER_URL", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_https_missing_token_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.delete("CLIPTUNNEL_REPEATER_TOKEN")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_REPEATER_TOKEN", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_https_missing_both_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.delete("CLIPTUNNEL_REPEATER_URL")
+            env.delete("CLIPTUNNEL_REPEATER_TOKEN")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_REPEATER_URL", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_https_case_insensitive(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "HTTPS")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            t = build_transport()
+            self.assertIsInstance(t, HttpsTransport)
+            t.close()
+        finally:
+            env.restore()
+
+
+class TestAESKey(unittest.TestCase):
+    def test_valid_aes_key_wraps_in_encrypted(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            env.set("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 32).decode())
+            t = build_transport()
+            self.assertIsInstance(t, EncryptedTransport)
+            t.close()
+        finally:
+            env.restore()
+
+    def test_wrong_length_aes_key_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            env.set("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 16).decode())
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("32 bytes", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_bad_base64_aes_key_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            env.set("CLIPTUNNEL_AES_KEY", "!!!not-base64!!!")
+            with self.assertRaises(ValueError):
+                build_transport()
+        finally:
+            env.restore()
+
+
+class TestUnknown(unittest.TestCase):
+    def test_unknown_transport_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "carrier-pigeon")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("not supported", str(ctx.exception))
+        finally:
+            env.restore()
+
+
+if __name__ == "__main__":
+    unittest.main()
