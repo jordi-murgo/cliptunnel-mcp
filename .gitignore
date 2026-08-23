@@ -32,3 +32,5 @@ Thumbs.db
 
 # Copilot agent OAuth token
 .copilot_agent_token
+
+openspec/

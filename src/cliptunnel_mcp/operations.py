@@ -319,13 +319,18 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
 
     # ── Agent auth ─────────────────────────────────────────────────
     try:
-        token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
-        if os.path.isfile(token_path):
-            with open(token_path, "r") as _f:
-                _tok = _f.read().strip()
-            info["agent_auth"] = "authenticated" if _tok else "no_token"
+        from cliptunnel_mcp.config import get_copilot_token
+
+        if get_copilot_token():
+            info["agent_auth"] = "authenticated"
         else:
-            info["agent_auth"] = "no_token"
+            token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
+            if os.path.isfile(token_path):
+                with open(token_path, "r") as _f:
+                    _tok = _f.read().strip()
+                info["agent_auth"] = "authenticated" if _tok else "no_token"
+            else:
+                info["agent_auth"] = "no_token"
     except Exception:
         info["agent_auth"] = "unknown"
 

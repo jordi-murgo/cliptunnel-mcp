@@ -1,19 +1,19 @@
 # cliptunnel-mcp
 
-Operate locked-down remote machines through their clipboard — now with multi-remote support, autonomous agents, clipboard preservation, and agent heartbeat.
+Operate locked-down remote machines through their clipboard or an HTTPS repeater — with multi-remote support, autonomous agents, clipboard preservation, agent heartbeat, and optional AES-256-GCM encryption.
 
 ## What it does
 
 `cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-**v0.7.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, and clipboard preservation that restores the user's clipboard after every exchange.
+**v0.8.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, an HTTPS repeater transport for NAT traversal and DLP evasion, and optional AES-256-GCM encryption that works with any transport.
 
 The package ships four layers:
 
 - **Protocol** — CT3 wire format with prefixed endpoint IDs (`C`/`R` + 7 hex), broadcast routing, keepalive pings, announce-based discovery, and typed messages (command, response, error, ack, ping, announce).
 - **Endpoints** — `Controller` (operator side) with a remote + controller registry, and multiple `Agent` instances (remote side), each with a unique prefixed ID. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
-- **MCP server** — a FastMCP application with 26 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, connection listing, and announce-based discovery.
-- **Clipboard transport** — backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform event-driven change detection, with user-clipboard preservation (non-protocol content is backed up and restored after each exchange).
+- **MCP server** — a FastMCP application with 27 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, connection listing, announce-based discovery, and remote install instructions.
+- **Transport layer** — clipboard (default, backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) with user-clipboard preservation) or HTTPS repeater (optional, with bearer auth). Both implement the same `Transport` and `RevisionMonitor` protocols — the Controller and Agent are fully transport-agnostic. An optional `EncryptedTransport` decorator adds AES-256-GCM encryption on top of any transport.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ graph LR
     Controller -- "CT3 wire<br/>(clipboard)" --> Agent2
 ```
 
-On startup the Controller broadcasts an ANNOUNCE. Each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends back its sysinfo as a registration response. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic.
+On startup the Controller broadcasts an ANNOUNCE. Each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends back its sysinfo as a registration response. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — the HTTPS transport does not touch the user's clipboard).
 
 ### Wire format
 
@@ -96,10 +96,10 @@ sequenceDiagram
     Note over A: every CLIPTUNNEL_HEARTBEAT_SECS (default 120s)<br/>+ random jitter 0–15s
     A-->>C: CT3|R...|C...|0|R|<sysinfo> (registration re-send)
     C-->>A: CT3|C...|R...|seq|A| (ACK)
-    Note over C: registry upsert + last_seen refreshed<br/>clipboard restored
+    Note over C: registry upsert + last_seen refreshed
 ```
 
-Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` with `seq=0` carrying `sysinfo`) to every known controller on a configurable interval plus jitter. The jitter prevents multiple agents sharing a clipboard from synchronizing their writes. A lost heartbeat is harmless — the next one arrives. The controller's existing registration upsert path consumes it with no protocol or controller changes.
+Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` with `seq=0` carrying `sysinfo`) to every known controller on a configurable interval plus jitter. The jitter prevents multiple agents sharing a channel from synchronizing their writes. A lost heartbeat is harmless — the next one arrives. The controller's existing registration upsert path consumes it with no protocol or controller changes.
 
 | Setting | Default | Effect |
 |---------|---------|--------|
@@ -126,7 +126,7 @@ With the heartbeat active, the keepalive loop stays mostly idle — it only ping
 
 ### Clipboard preservation
 
-The clipboard is the user's real pasteboard, so every protocol write would clobber whatever the user copied. ClipTunnel now preserves it:
+The clipboard is the user's real pasteboard, so every protocol write would clobber whatever the user copied. The clipboard transport preserves it:
 
 - **Backup** — the transport observes every clipboard change. Any non-empty value that is not CT3 protocol traffic (`CT3|…`) is retained as the user-clipboard candidate. The backup is also seeded at construction from the initial value, so a startup announce never destroys pre-existing content.
 - **Guarded restore** — after the Controller sends the final ACK of an exchange, it calls `transport.restore_user_clipboard()`. The restore happens **only if the OS clipboard still holds this process's last self-write**; if another process or the user wrote anything in between, the restore is a silent no-op (it would otherwise clobber that content). On success the backup is written back as a self-write.
@@ -140,11 +140,11 @@ pip install cliptunnel-mcp          # core + cliptunnel-agent binary
 pip install cliptunnel-mcp[server]  # adds MCP server binary (mcp>=1.2,<2)
 ```
 
-Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications).
+Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifications), `cryptography>=42` (AES-256-GCM encryption), plus `tomli` on Python 3.10 only (TOML config file parsing; stdlib from 3.11).
 
 | Binary              | Extra needed | Purpose                                      |
 |---------------------|--------------|----------------------------------------------|
-| `cliptunnel-agent`  | *(none)*     | Runs the Agent on the local OS clipboard.    |
+| `cliptunnel-agent`  | *(none)*     | Runs the Agent (clipboard or HTTPS transport). |
 | `cliptunnel-mcp`    | `[server]`   | Runs the MCP server over stdio.              |
 
 ## Quick start
@@ -162,7 +162,7 @@ cliptunnel-agent
 > python -m cliptunnel_mcp.server   # instead of cliptunnel-mcp
 > ```
 
-The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard for commands. It uses `clipboard-event` for change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
+The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard (or connects to the repeater if `CLIPTUNNEL_TRANSPORT=https`) for commands. It uses `clipboard-event` for clipboard change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
 
 ### Controller + MCP server (operator machine)
 
@@ -179,16 +179,16 @@ Configure your MCP client (Claude Desktop, Cursor, Pi, etc.):
 }
 ```
 
-The server broadcasts an announce on startup, discovers connected remotes and any other controllers, and maintains a live registry with keepalive pings. After every exchange it restores the user's clipboard content.
+The server broadcasts an announce on startup, discovers connected remotes and any other controllers, and maintains a live registry with keepalive pings. When using the clipboard transport, it restores the user's clipboard content after every exchange.
 
 ### Controller only (no MCP)
 
 ```python
-from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+from cliptunnel_mcp.transport_factory import build_transport
 from cliptunnel_mcp import Controller
 import json
 
-controller = Controller(transport=ClipboardTransport())
+controller = Controller(transport=build_transport())
 
 # Send to a specific remote
 future = controller.send_command(json.dumps({"op": "shell", "cmd": "whoami"}), remote_id="R1b2c3d4")
@@ -202,18 +202,20 @@ connections = controller.get_connections()
 ### Programmatic Agent
 
 ```python
-from cliptunnel_mcp.clipboard_transport import ClipboardTransport
+from cliptunnel_mcp.transport_factory import build_transport
 from cliptunnel_mcp import Agent
 from cliptunnel_mcp.operations import dispatch
 
-agent = Agent(transport=ClipboardTransport(), handler=dispatch)
+agent = Agent(transport=build_transport(), handler=dispatch)
 # Agent generates its own remote_id, registers automatically, and heartbeats every 120s.
 # Disable the heartbeat with heartbeat_secs=0 (or CLIPTUNNEL_HEARTBEAT_SECS=0).
+# Set CLIPTUNNEL_TRANSPORT=https to use the HTTPS repeater instead of the clipboard.
+# Set CLIPTUNNEL_AES_KEY to enable AES-256-GCM encryption on any transport.
 ```
 
 ## MCP tools
 
-The server exposes **26 tools** over stdio. All tools accept an optional `remote_id` parameter to target a specific remote. If omitted, the Controller picks the first alive remote.
+The server exposes **27 tools** over stdio. All tools accept an optional `remote_id` parameter to target a specific remote. If omitted, the Controller picks the first alive remote.
 
 ### Shell & filesystem
 
@@ -264,7 +266,8 @@ The server exposes **26 tools** over stdio. All tools accept an optional `remote
 | Tool | Description |
 |------|-------------|
 | `remote_connections` | List all connected remotes and controllers with sysinfo, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
-| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard. |
+| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard or repeater. |
+| `remote_install_instructions` | Return installation instructions for the remote agent based on the controller's active transport (clipboard or HTTPS). Includes env vars, repeater URL, bearer token, and AES key (if configured). |
 
 ## Operations
 
@@ -304,7 +307,7 @@ remote_agent_login()          # Returns user_code + verification_uri
 remote_agent_login_status()   # Returns {status: "done", token_saved: true}
 ```
 
-Token stored in `.copilot_agent_token` on the remote machine. The token lookup is relative to the agent process working directory, so launch the agent from a directory that contains (or can access) the token file.
+Token resolution order: the `[copilot].oauth_token` key in the config file (see [Configuration](#configuration)) takes precedence; the legacy `.copilot_agent_token` file on the remote machine is still supported as a fallback. The token lookup for the legacy file is relative to the agent process working directory, so launch the agent from a directory that contains (or can access) the token file.
 
 ## API surface
 
@@ -337,6 +340,48 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 | `read() -> str \| None` | Return the current clipboard value (cached). |
 | `write(text: str)` | Write to the clipboard as a self-write. |
 | `restore_user_clipboard() -> bool` | Guarded restore of the backed-up user content; `True` on success, `False` if the slot was touched by another writer or no backup exists. |
+
+### `HttpsTransport`
+
+| Method | Description |
+|--------|-------------|
+| `read() -> str` | Return the current cached value (never blocks, never raises). |
+| `write(value: str)` | POST to repeater, bump revision, notify waiters. Raises `TransportAuthError` on 401, `TransportError` on other failures. |
+| `revision` property | Current revision counter. |
+| `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
+| `close()` | Stop the SSE daemon thread. Idempotent. |
+| `backend_name` property | Returns `"https"`. |
+
+Constructor parameters: `repeater_url` (required), `bearer_token` (required), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `poll_timeout`, `request_timeout`.
+
+### `EncryptedTransport`
+
+A decorator that wraps any transport with AES-256-GCM encryption. When `CLIPTUNNEL_AES_KEY` is set, `build_transport()` automatically wraps the selected transport.
+
+| Method | Description |
+|--------|-------------|
+| `read() -> str` | Read and decrypt from the inner transport. |
+| `write(value: str)` | Encrypt and write to the inner transport. |
+| `revision` property | Delegates to the inner transport. |
+| `wait_for_change(after, timeout) -> int` | Delegates to the inner transport. |
+| `close()` | Close the inner transport. Idempotent. |
+| `backend_name` property | Returns `"encrypted:<inner>"`. |
+
+Constructor parameters: `inner` (required, any `Transport`), `aes_key` (required, 32 bytes).
+
+### `build_transport()` factory
+
+| Function | Description |
+|----------|-------------|
+| `build_transport() -> Transport` | Resolve `CLIPTUNNEL_TRANSPORT` (env var, or config file `[transport] type`) and return a `ClipboardTransport` (default) or `HttpsTransport`. If `CLIPTUNNEL_AES_KEY` / `[encryption].aes_key` is set, wraps the transport in `EncryptedTransport`. Raises `ValueError` on missing required settings or unknown transport. Precedence: env var > config file > default. |
+
+### `crypto` module
+
+| Function | Description |
+|--------|-------------|
+| `encrypt(plaintext: str, key: bytes) -> str` | AES-256-GCM encrypt. Returns `base64(nonce[12] ‖ ciphertext+tag)`. |
+| `decrypt(blob: str, key: bytes) -> str` | AES-256-GCM decrypt. Raises on tampered tag or wrong key. |
+| `parse_key(raw: str) -> bytes` | Parse a base64-encoded 32-byte key from `CLIPTUNNEL_AES_KEY`. Raises `ValueError` on invalid input. |
 
 ### Protocol primitives
 
@@ -382,7 +427,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (275 tests)
+# Run the test suite (395 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -401,7 +446,7 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 - **Announce discovery**: the Controller broadcasts an ANNOUNCE on startup and on `remote_discovery`; agents and other controllers reply. Replies can collide on the shared slot; the heartbeat makes this self-healing.
 - **Heartbeat**: each Agent re-sends its registration every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) + jitter (0–15s); `<= 0` disables. The controller upserts the roster on every heartbeat.
 - **Keepalive**: Controller pings remotes after 5 min idle, marks dead if no response within 30s. With the heartbeat active, this only fires for agents that have stopped heartbeating.
-- **Clipboard preservation**: the transport backs up non-CT3 clipboard content; the Controller restores it (guarded) after the final ACK of every exchange.
+- **Clipboard preservation**: the clipboard transport backs up non-CT3 clipboard content; the Controller restores it (guarded) after the final ACK of every exchange.
 - **Broadcast routing**: `to=*` messages are processed by all remotes with random backoff; no ACK.
 - **Targeted routing**: `to=<R+7hex>` messages are processed only by that remote; others ignore.
 - **Stale message guard**: the Controller skips R/E with `seq <= min_seq`.
@@ -412,9 +457,190 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 
 - **Text-only clipboard**: the protocol carries UTF-8 strings, and the preservation backup is text-only. Binary files are base64-encoded; rich content (images, RTF) copied by the user is not preserved by the restore.
 - **Shared slot**: multiple remotes and controllers share one clipboard; the protocol serializes all traffic, and announce responses can race (mitigated by the heartbeat).
-- **No encryption**: the wire format is plain base64.
-- **Multi-controller**: multiple controllers are discovered and tracked, but they share the single clipboard channel — the protocol is designed for one primary Controller and multiple Agents.
+- **No wire encryption by default**: the CT3 wire format is plain base64. Set `CLIPTUNNEL_AES_KEY` to enable AES-256-GCM encryption on any transport (clipboard or HTTPS).
+- **Multi-controller**: multiple controllers are discovered and tracked. With the clipboard transport they share one channel; with the HTTPS transport they share one repeater slot. The protocol is designed for one primary Controller and multiple Agents.
 - **CT3-looking user content**: if the user copies a string starting with `CT3|`, it is treated as protocol traffic and not backed up.
+
+## Configuration
+
+Configuration has two layers with strict precedence:
+
+1. **Environment variables** (highest precedence)
+2. **Config file** (TOML, default `~/.cliptunnel/config.toml`)
+3. **Built-in defaults** (lowest)
+
+The config file path resolves as: `--config PATH` CLI flag (on both
+`cliptunnel-agent` and `cliptunnel-mcp`) > `CLIPTUNNEL_CONFIG` env var >
+`~/.cliptunnel/config.toml`. A missing config file is not an error — all
+settings simply fall through to the environment/default layers.
+
+Ready-to-edit examples: [`config.toml-example-controller`](config.toml-example-controller) (operator machine) and [`config.toml-example-agent`](config.toml-example-agent) (remote machine). Copy one to `~/.cliptunnel/config.toml`, edit the values, `chmod 600`, and no environment variables are needed.
+
+Full annotated example covering every supported section:
+
+```toml
+# ~/.cliptunnel/config.toml
+
+[transport]
+type = "clipboard"                  # "clipboard" (default) or "https"
+repeater_url = "https://repeater.example.com"   # required when type = "https"
+repeater_token = "agent-bearer-token"           # required when type = "https"
+
+[encryption]
+aes_key = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY="  # base64 of 32 bytes; enables AES-256-GCM on any transport
+
+[heartbeat]
+interval_secs = 120                 # <= 0 disables the heartbeat
+
+[copilot]
+oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes precedence over the legacy .copilot_agent_token file
+```
+
+> **Security**: this file holds secrets. Create it user-only-readable
+> (`mkdir -p ~/.cliptunnel && chmod 700 ~/.cliptunnel && chmod 600 ~/.cliptunnel/config.toml`).
+> The loader logs a warning (never fatal) if the file is readable by group
+> or others.
+>
+> The legacy `.copilot_agent_token` file remains fully supported as a
+> fallback: `[copilot].oauth_token` in the config file wins when both exist.
+
+### Transport selection (Controller and Agent)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard` or `https`. Case-insensitive. |
+| `CLIPTUNNEL_REPEATER_URL` | — | yes (https) | Repeater URL, e.g. `https://repeater.example.com`. |
+| `CLIPTUNNEL_REPEATER_TOKEN` | — | yes (https) | Bearer token for repeater authentication. |
+
+### Encryption (Controller and Agent)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLIPTUNNEL_AES_KEY` | — | no | Base64-encoded 32-byte AES-256 key. When set, all CT3 traffic is encrypted with AES-256-GCM via `EncryptedTransport`. Works with any transport. |
+
+### Heartbeat (Agent)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | no | Heartbeat interval in seconds. `<= 0` disables. Works with both transports. |
+
+### Repeater service (repeater only)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `REPEATER_TOKENS` | — | yes | Comma-separated `name:token` pairs, e.g. `ctrl:key1,agent-a:key2`. |
+| `REPEATER_HOST` | `0.0.0.0` | no | Bind address. |
+| `REPEATER_PORT` | `8443` | no | Listen port (behind TLS proxy). |
+
+### Copilot agent (Agent only)
+
+| Source | Default | Required | Description |
+|--------|---------|----------|-------------|
+| `[copilot] oauth_token` (config file) | — | no | GitHub Copilot OAuth token; checked before the legacy file. |
+| `.copilot_agent_token` | — | no | Legacy fallback: file in the agent working directory containing the GitHub Copilot token. Created by `remote_agent_login`. |
+
+## HTTPS repeater transport
+
+When the clipboard channel is unavailable (no shared clipboard across networks), monitored by DLP agents, or you need NAT traversal, ClipTunnel can use an **HTTPS repeater** as an alternative transport. Both the Controller and Agent are outbound HTTPS clients of a small relay service — no inbound ports needed on the remote machine.
+
+### Architecture
+
+```
+Controller  <--HTTPS/SSE-->  Repeater  <--HTTPS/SSE-->  Agent
+(operator)                    (relay)                   (remote VDI)
+```
+
+The repeater is a **zero-knowledge relay**: it authenticates peers via bearer tokens but cannot decrypt content. When AES is enabled, the repeater never sees plaintext even if TLS is terminated at its edge.
+
+### When to use it
+
+- The remote machine has outbound HTTPS but no inbound reachability (NAT, firewall).
+- The clipboard channel is monitored, filtered, or unreliable (DLP).
+- You want traffic that blends with normal web API usage rather than clipboard data movement.
+
+### Setup
+
+1. **Deploy a repeater.** Run the repeater service (see below) at a URL the Agent can reach. Deploy behind a TLS proxy (Caddy, Cloudflare, API Gateway).
+
+2. **Configure the Controller.** Set the transport to `https` on the operator machine — either via env vars (`CLIPTUNNEL_TRANSPORT=https` plus repeater URL and bearer token) or via a [config file](#configuration) (`[transport] type = "https"`).
+3. **Get install instructions.** Call the `remote_install_instructions` MCP tool from your MCP client. It returns exact env vars and commands for the remote side.
+
+4. **Start the Agent.** On the remote VDI, run `cliptunnel-agent` with the environment variables from the install instructions. The Agent connects outbound to the repeater via HTTPS.
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLIPTUNNEL_TRANSPORT` | `clipboard` | Transport selection: `clipboard` or `https`. Case-insensitive. |
+| `CLIPTUNNEL_REPEATER_URL` | — | (HTTPS only) Repeater URL, e.g. `https://repeater.example.com`. Required when transport is `https`. |
+| `CLIPTUNNEL_REPEATER_TOKEN` | — | (HTTPS only) Bearer token for repeater authentication. Required when transport is `https`. |
+| `CLIPTUNNEL_AES_KEY` | — | (optional) Base64-encoded 32-byte AES-256 key. When set, all CT3 traffic is encrypted with AES-256-GCM via `EncryptedTransport` before entering the transport. Works with any transport. The repeater never sees plaintext. |
+| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | Heartbeat interval in seconds. `<= 0` disables. Works with both transports. |
+
+### AES-256-GCM encryption
+
+When `CLIPTUNNEL_AES_KEY` is set, `build_transport()` wraps the selected transport in `EncryptedTransport`, which encrypts the full CT3 wire string with AES-256-GCM before writing it to the transport, and decrypts it after reading. The format is `base64(nonce[12] ‖ ciphertext+tag[16])`. The repeater (or the clipboard) never sees plaintext.
+
+This works with **any transport** — clipboard or HTTPS. The encryption layer is a decorator that sits between the Controller/Agent and the underlying transport.
+
+Generate a key:
+
+```bash
+python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+# or, equivalently:
+openssl rand -base64 32
+```
+
+Set it on both the Controller and the Agent (out-of-band, not over the channel):
+
+```bash
+export CLIPTUNNEL_AES_KEY=<the base64 string from above>
+```
+
+If `CLIPTUNNEL_AES_KEY` is not set, the transport passes plaintext (base64 CT3). Encryption is optional and backward-compatible.
+
+### Repeater service
+
+The repeater is a small stdlib-only HTTP service (no third-party deps). For production deployment with automatic HTTPS, see [`deploy/`](deploy/) for Docker + Caddy and Cloudflare Tunnel guides.
+
+```bash
+# The repeater is stdlib-only (no additional deps), included in the core package.
+python -m cliptunnel_mcp.repeater
+```
+
+Repeater environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REPEATER_TOKENS` | — | Comma-separated `name:token` pairs, e.g. `ctrl:key1,agent-a:key2`. Required. |
+| `REPEATER_HOST` | `0.0.0.0` | Bind address. |
+| `REPEATER_PORT` | `8443` | Listen port. |
+
+The repeater has three endpoints, all requiring `Authorization: Bearer <token>`:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/slot` | `POST` | Write a value to the slot. Returns `{"revision": N}`. |
+| `/slot` | `GET` | Return the current slot snapshot `{"value": "...", "revision": N}`. |
+| `/slot/events` | `GET` | SSE stream of write events. Each write pushes `event: write\ndata: <value>\n\n`. |
+
+The repeater state is ephemeral (in-memory). On restart, peers self-heal via the heartbeat mechanism. No database, no disk.
+
+### Install instructions tool
+
+The `remote_install_instructions` MCP tool returns installation instructions for the remote agent based on the Controller's active transport:
+
+- **Clipboard**: returns `pip install cliptunnel-mcp` and `cliptunnel-agent` (no env vars needed).
+- **HTTPS**: returns `pip install cliptunnel-mcp`, the repeater URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
+
+> **Security**: the tool output contains sensitive config (tokens, AES key). Do not log it or share it insecurely. The tool returns instructions for the operator, not a script that auto-executes.
+
+### Install extras
+
+```bash
+pip install cliptunnel-mcp          # core + clipboard transport + AES encryption (cryptography included)
+pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
+```
 
 ## License
 

@@ -1,0 +1,57 @@
+# cliptunnel-mcp — EXAMPLE CONFIGURATION: AGENT (remote machine / VDI)
+#
+# Usage on the remote machine:
+#   cp config.toml-example-agent ~/.cliptunnel/config.toml
+#   chmod 600 ~/.cliptunnel/config.toml
+#   edit values, then just run `cliptunnel-agent` — no env vars needed.
+#
+# Non-default file location:
+#   cliptunnel-agent --config /path/to/config.toml
+#   (or export CLIPTUNNEL_CONFIG=/path/to/config.toml)
+#
+# Precedence: environment variable > this file > built-in default.
+#
+# SECURITY: this file contains secrets. Keep it user-readable only
+# (chmod 600). The loader logs a warning if group/world-readable.
+
+# ---------------------------------------------------------------------------
+# Transport — must MATCH the Controller's [transport] type, and use values
+# issued for THIS agent (each agent should have its own bearer token).
+# ---------------------------------------------------------------------------
+[transport]
+type = "https"
+repeater_url = "https://repeater.example.com"     # same repeater as the Controller
+repeater_token = "change-me-agent-bearer-token"   # this agent's own token
+
+# ---------------------------------------------------------------------------
+# Optional AES-256-GCM encryption — MUST use the SAME key as the Controller.
+#
+# Generate a key (either one-liner works):
+#
+#   python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+#   openssl rand -base64 32
+#
+# Paste the output below as-is. It must be identical on both sides.
+# ---------------------------------------------------------------------------
+[encryption]
+aes_key = "REPLACE-WITH-GENERATED-KEY-44-BASE64-CHARS"
+
+# ---------------------------------------------------------------------------
+# Agent heartbeat — keeps the Controller's roster self-healing.
+# Default 120s + random jitter (0-15s). Set <= 0 to disable.
+# ---------------------------------------------------------------------------
+[heartbeat]
+interval_secs = 120
+
+# ---------------------------------------------------------------------------
+# GitHub Copilot OAuth token (gho_...) — only needed to run autonomous
+# Copilot sessions on this machine (remote_agent_start MCP tool).
+#
+# Takes precedence over the legacy .copilot_agent_token file in the agent
+# working directory. If omitted here, the legacy file lookup is used.
+#
+# Obtain via the remote_agent_login MCP tool → open the verification URL →
+# enter the code → paste the gho_ token here.
+# ---------------------------------------------------------------------------
+[copilot]
+oauth_token = "gho_exampleCopilotOAuthToken1234567890"
