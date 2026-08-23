@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import base64
 import os
+import tempfile
 import unittest
+from unittest import mock
 
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
 from cliptunnel_mcp.encrypted_transport import EncryptedTransport
@@ -203,6 +205,57 @@ class TestUnknown(unittest.TestCase):
             self.assertIn("not supported", str(ctx.exception))
         finally:
             env.restore()
+
+
+class TestConfigFile(unittest.TestCase):
+    """build_transport() must work purely from a config.toml file."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Clear every CLIPTUNNEL_* env var so only the file can supply settings.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in (
+            "CLIPTUNNEL_TRANSPORT",
+            "CLIPTUNNEL_REPEATER_URL",
+            "CLIPTUNNEL_REPEATER_TOKEN",
+            "CLIPTUNNEL_AES_KEY",
+        ):
+            os.environ.pop(name, None)
+        # Point the config layer at a temp file via CLIPTUNNEL_CONFIG.
+        self.config_path = os.path.join(self._tmp.name, "config.toml")
+        os.environ["CLIPTUNNEL_CONFIG"] = self.config_path
+
+    def _write(self, content: str) -> None:
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def test_https_built_from_config_file_only(self) -> None:
+        """A non-https URL in the file proves the file was consumed."""
+        self._write(
+            '[transport]\n'
+            'type = "https"\n'
+            'repeater_url = "http://repeater.example.com"\n'
+            'repeater_token = "tok"\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            build_transport()
+        self.assertIn("https scheme", str(ctx.exception))
+
+    def test_https_constructed_from_config_file_and_closed(self) -> None:
+        """Valid https URL from the file builds HttpsTransport; close immediately."""
+        self._write(
+            '[transport]\n'
+            'type = "https"\n'
+            'repeater_url = "https://127.0.0.1:1"\n'
+            'repeater_token = "tok"\n'
+        )
+        # mock.patch.dict (setUp) restores env on teardown.
+        transport = build_transport()
+        self.assertIsInstance(transport, HttpsTransport)
+        transport.close()
 
 
 if __name__ == "__main__":

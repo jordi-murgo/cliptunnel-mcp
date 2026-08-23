@@ -50,13 +50,25 @@ class CopilotClient:
         self._ssl_ctx = ssl.create_default_context()
 
     def _read_oauth_token(self) -> str:
-        """Read the gho_ token from file."""
+        """Read the gho_ token: config file first, then legacy token file.
+
+        ``[copilot].oauth_token`` in the TOML config file
+        (``~/.cliptunnel/config.toml``) takes precedence; when it is not set
+        the legacy ``.copilot_agent_token`` file is used as before.
+        """
+        from cliptunnel_mcp.config import get_copilot_token
+
+        config_token = get_copilot_token()
+        if config_token:
+            return config_token
         try:
             with open(self._token_file, "r") as f:
                 return f.read().strip()
         except FileNotFoundError:
             raise FileNotFoundError(
-                f"Copilot token file not found: {self._token_file}"
+                "No Copilot OAuth token found: set [copilot] oauth_token in "
+                "the config file or create the legacy file "
+                f"{self._token_file}"
             )
 
     def _exchange_token(self) -> CopilotToken:

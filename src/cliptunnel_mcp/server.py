@@ -27,6 +27,7 @@ runs; until then every tool call reports an error string instead of raising.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import concurrent.futures
 import json
@@ -47,6 +48,7 @@ try:
 except ImportError:
     Context = None  # type: ignore[assignment,misc]
 
+from cliptunnel_mcp import config
 from cliptunnel_mcp.controller import Controller
 
 logger = logging.getLogger(__name__)
@@ -407,8 +409,23 @@ def agent_models(remote_id: str | None = None) -> str | None:
         return None
     # Write the script to remote and run it (avoids shell quoting issues)
     script = (
-        'import json, ssl, urllib.request\n'
-        'OAUTH = open(".copilot_agent_token").read().strip()\n'
+        'import json, ssl, urllib.request, os\n'
+        'OAUTH = None\n'
+        'try:\n'
+        '    import tomllib\n'
+        'except ImportError:\n'
+        '    try:\n'
+        '        import tomli as tomllib\n'
+        '    except ImportError:\n'
+        '        tomllib = None\n'
+        'if tomllib is not None:\n'
+        '    try:\n'
+        '        with open(os.path.expanduser("~/.cliptunnel/config.toml"), "rb") as f:\n'
+        '            OAUTH = (tomllib.load(f).get("copilot", {}) or {}).get("oauth_token") or None\n'
+        '    except Exception:\n'
+        '        OAUTH = None\n'
+        'if OAUTH is None:\n'
+        '    OAUTH = open(".copilot_agent_token").read().strip()\n'
         'ctx = ssl.create_default_context()\n'
         'req = urllib.request.Request("https://api.github.com/copilot_internal/v2/token")\n'
         'req.add_header("Authorization", f"token {OAUTH}")\n'
@@ -846,12 +863,12 @@ def create_server():
         WARNING: Output contains bearer tokens and AES keys. Do not log
         or expose this output beyond the operator.
         """
-        transport = os.environ.get("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
+        transport = config.get_env("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
 
         if transport == "https":
-            repeater_url = os.environ.get("CLIPTUNNEL_REPEATER_URL", "")
-            agent_token = os.environ.get("CLIPTUNNEL_REPEATER_TOKEN", "")
-            aes_key_raw = os.environ.get("CLIPTUNNEL_AES_KEY")
+            repeater_url = config.get_env("CLIPTUNNEL_REPEATER_URL", "")
+            agent_token = config.get_env("CLIPTUNNEL_REPEATER_TOKEN", "")
+            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
 
             env_vars = {
                 "CLIPTUNNEL_TRANSPORT": "https",
@@ -911,12 +928,24 @@ def main() -> None:
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+
+    parser = argparse.ArgumentParser(description="ClipTunnel MCP server")
+    parser.add_argument(
+        "--config", metavar="PATH", default=None,
+        help=(
+            "path to the TOML config file "
+            f"(default: {config.DEFAULT_CONFIG_PATH}, "
+            "overridable via CLIPTUNNEL_CONFIG)"
+        ),
+    )
+    args = parser.parse_args()
+
+    # Apply the --config override before anything resolves settings.
+    config.set_config_path(args.config)
+
     from cliptunnel_mcp.transport_factory import build_transport
 
     transport = build_transport()
-    set_controller(Controller(transport=transport))
-    logger.info("Controller wired to %s transport", transport.backend_name)
-    create_server().run(transport="stdio")
 
 
 if __name__ == "__main__":

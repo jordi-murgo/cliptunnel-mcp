@@ -1,6 +1,9 @@
-"""Transport factory — selects the active transport from environment.
+"""Transport factory — selects the active transport from configuration.
 
-Reads ``CLIPTUNNEL_TRANSPORT`` (default ``clipboard``, case-insensitive).
+Settings resolve with precedence: environment variable > config file
+(``~/.cliptunnel/config.toml``, see :mod:`cliptunnel_mcp.config`) >
+built-in default. ``CLIPTUNNEL_TRANSPORT`` selects ``clipboard``
+(default, case-insensitive) or ``https``.
 ``clipboard`` → :class:`~cliptunnel_mcp.clipboard_transport.ClipboardTransport`.
 ``https`` → :class:`~cliptunnel_mcp.https_transport.HttpsTransport`.
 
@@ -14,8 +17,7 @@ never pulls in ``clipboard-event`` or ``cryptography`` at import time.
 """
 from __future__ import annotations
 
-import os
-
+from cliptunnel_mcp import config
 from cliptunnel_mcp.transport import Transport
 
 __all__ = ["build_transport"]
@@ -24,15 +26,16 @@ _ACCEPTED = {"clipboard", "https"}
 
 
 def build_transport() -> Transport:
-    """Build the transport selected by ``CLIPTUNNEL_TRANSPORT``.
+    """Build the transport selected by ``CLIPTUNNEL_TRANSPORT`` (or its
+    ``[transport] type`` config-file equivalent).
 
     If ``CLIPTUNNEL_AES_KEY`` is set, the transport is wrapped in
     :class:`~cliptunnel_mcp.encrypted_transport.EncryptedTransport`.
 
     Raises :class:`ValueError` for unknown transport selectors or missing
-    required environment variables.
+    required settings.
     """
-    choice = os.environ.get("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
+    choice = config.get_env("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
 
     # --- Select the base transport ---
     if choice == "clipboard":
@@ -43,8 +46,8 @@ def build_transport() -> Transport:
     elif choice == "https":
         from urllib.parse import urlparse
 
-        repeater_url = os.environ.get("CLIPTUNNEL_REPEATER_URL", "").strip()
-        bearer_token = os.environ.get("CLIPTUNNEL_REPEATER_TOKEN", "").strip()
+        repeater_url = (config.get_env("CLIPTUNNEL_REPEATER_URL") or "").strip()
+        bearer_token = (config.get_env("CLIPTUNNEL_REPEATER_TOKEN") or "").strip()
 
         missing: list[str] = []
         if not repeater_url:
@@ -76,7 +79,7 @@ def build_transport() -> Transport:
         )
 
     # --- Optional AES encryption layer (works with any transport) ---
-    aes_env = os.environ.get("CLIPTUNNEL_AES_KEY")
+    aes_env = config.get_env("CLIPTUNNEL_AES_KEY")
     if aes_env:
         from cliptunnel_mcp.crypto import parse_key
 

@@ -463,7 +463,44 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 
 ## Configuration
 
-All configuration is via environment variables. There is no config file.
+Configuration has two layers with strict precedence:
+
+1. **Environment variables** (highest precedence)
+2. **Config file** (TOML, default `~/.cliptunnel/config.toml`)
+3. **Built-in defaults** (lowest)
+
+The config file path resolves as: `--config PATH` CLI flag (on both
+`cliptunnel-agent` and `cliptunnel-mcp`) > `CLIPTUNNEL_CONFIG` env var >
+`~/.cliptunnel/config.toml`. A missing config file is not an error — all
+settings simply fall through to the environment/default layers.
+
+Full annotated example covering every supported section:
+
+```toml
+# ~/.cliptunnel/config.toml
+
+[transport]
+type = "clipboard"                  # "clipboard" (default) or "https"
+repeater_url = "https://repeater.example.com"   # required when type = "https"
+repeater_token = "agent-bearer-token"           # required when type = "https"
+
+[encryption]
+aes_key = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY="  # base64 of 32 bytes; enables AES-256-GCM on any transport
+
+[heartbeat]
+interval_secs = 120                 # <= 0 disables the heartbeat
+
+[copilot]
+oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes precedence over the legacy .copilot_agent_token file
+```
+
+> **Security**: this file holds secrets. Create it user-only-readable
+> (`mkdir -p ~/.cliptunnel && chmod 700 ~/.cliptunnel && chmod 600 ~/.cliptunnel/config.toml`).
+> The loader logs a warning (never fatal) if the file is readable by group
+> or others.
+>
+> The legacy `.copilot_agent_token` file remains fully supported as a
+> fallback: `[copilot].oauth_token` in the config file wins when both exist.
 
 ### Transport selection (Controller and Agent)
 
@@ -495,9 +532,10 @@ All configuration is via environment variables. There is no config file.
 
 ### Copilot agent (Agent only)
 
-| Variable | Default | Required | Description |
-|----------|---------|----------|-------------|
-| `.copilot_agent_token` | — | no | File in the agent working directory containing the GitHub Copilot token. Created by `remote_agent_login`. |
+| Source | Default | Required | Description |
+|--------|---------|----------|-------------|
+| `[copilot] oauth_token` (config file) | — | no | GitHub Copilot OAuth token; checked before the legacy file. |
+| `.copilot_agent_token` | — | no | Legacy fallback: file in the agent working directory containing the GitHub Copilot token. Created by `remote_agent_login`. |
 
 ## HTTPS repeater transport
 
