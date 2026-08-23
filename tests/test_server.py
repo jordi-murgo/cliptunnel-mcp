@@ -413,6 +413,26 @@ class TestRemoteInstallInstructions(ServerTestCase):
                       "CLIPTUNNEL_REPEATER_TOKEN", "CLIPTUNNEL_AES_KEY"):
                 os.environ.pop(k, None)
 
+    def test_firebase_variant(self):
+        """Firebase transport returns full config with URL + token."""
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "firebase"
+        os.environ["CLIPTUNNEL_FIREBASE_URL"] = "https://x-default-rtdb.firebaseio.com"
+        os.environ["CLIPTUNNEL_FIREBASE_TOKEN"] = "fb-secret"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "firebase")
+            self.assertEqual(data["firebase_url"], "https://x-default-rtdb.firebaseio.com")
+            self.assertEqual(data["firebase_token"], "fb-secret")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_TRANSPORT"], "firebase")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_FIREBASE_TOKEN"], "fb-secret")
+            self.assertNotIn("aes_key", data)
+            self.assertIn("CLIPTUNNEL_FIREBASE_TOKEN=fb-secret", data["agent_command"])
+        finally:
+            for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_FIREBASE_URL",
+                      "CLIPTUNNEL_FIREBASE_TOKEN"):
+                os.environ.pop(k, None)
+
 
 if __name__ == "__main__":
     unittest.main()

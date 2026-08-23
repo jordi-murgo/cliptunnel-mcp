@@ -1,6 +1,6 @@
 # cliptunnel-mcp
 
-Operate locked-down remote machines through their clipboard or an HTTPS repeater — with multi-remote support, autonomous agents, clipboard preservation, agent heartbeat, and optional AES-256-GCM encryption.
+Operate locked-down remote machines through their clipboard, an HTTPS repeater, or Firebase — with multi-remote support, autonomous agents, clipboard preservation, agent heartbeat, and optional AES-256-GCM encryption.
 
 ## What it does
 
@@ -144,7 +144,7 @@ Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifica
 
 | Binary              | Extra needed | Purpose                                      |
 |---------------------|--------------|----------------------------------------------|
-| `cliptunnel-agent`  | *(none)*     | Runs the Agent (clipboard or HTTPS transport). |
+| `cliptunnel-agent`  | *(none)*     | Runs the Agent (clipboard, HTTPS, or Firebase transport). |
 | `cliptunnel-mcp`    | `[server]`   | Runs the MCP server over stdio.              |
 
 ## Quick start
@@ -162,7 +162,7 @@ cliptunnel-agent
 > python -m cliptunnel_mcp.server   # instead of cliptunnel-mcp
 > ```
 
-The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard (or connects to the repeater if `CLIPTUNNEL_TRANSPORT=https`) for commands. It uses `clipboard-event` for clipboard change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
+The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard (or connects to the repeater / Firebase RTDB if `CLIPTUNNEL_TRANSPORT` is `https` or `firebase`) for commands. It uses `clipboard-event` for clipboard change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
 
 ### Controller + MCP server (operator machine)
 
@@ -387,7 +387,7 @@ Constructor parameters: `inner` (required, any `Transport`), `aes_key` (required
 
 | Function | Description |
 |----------|-------------|
-| `build_transport() -> Transport` | Resolve `CLIPTUNNEL_TRANSPORT` (env var, or config file `[transport] type`) and return a `ClipboardTransport` (default) or `HttpsTransport`. If `CLIPTUNNEL_AES_KEY` / `[encryption].aes_key` is set, wraps the transport in `EncryptedTransport`. Raises `ValueError` on missing required settings or unknown transport. Precedence: env var > config file > default. |
+| `build_transport() -> Transport` | Resolve `CLIPTUNNEL_TRANSPORT` (env var, or config file `[transport] type`) and return a `ClipboardTransport` (default), `HttpsTransport`, or `FirebaseTransport`. If `CLIPTUNNEL_AES_KEY` / `[encryption].aes_key` is set, wraps the transport in `EncryptedTransport`. Raises `ValueError` on missing required settings or unknown transport. Precedence: env var > config file > default. |
 
 ### `crypto` module
 
@@ -441,7 +441,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (395 tests with both pytest and unittest)
+# Run the test suite (420 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -471,7 +471,7 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 
 - **Text-only clipboard**: the protocol carries UTF-8 strings, and the preservation backup is text-only. Binary files are base64-encoded; rich content (images, RTF) copied by the user is not preserved by the restore.
 - **Shared slot**: multiple remotes and controllers share one clipboard; the protocol serializes all traffic, and announce responses can race (mitigated by the heartbeat).
-- **No wire encryption by default**: the CT3 wire format is plain base64. Set `CLIPTUNNEL_AES_KEY` to enable AES-256-GCM encryption on any transport (clipboard or HTTPS).
+- **No wire encryption by default**: the CT3 wire format is plain base64. Set `CLIPTUNNEL_AES_KEY` to enable AES-256-GCM encryption on any transport (clipboard, HTTPS, or Firebase).
 - **Multi-controller**: multiple controllers are discovered and tracked. With the clipboard transport they share one channel; with the HTTPS transport they share one repeater slot. The protocol is designed for one primary Controller and multiple Agents.
 - **CT3-looking user content**: if the user copies a string starting with `CT3|`, it is treated as protocol traffic and not backed up.
 
@@ -522,6 +522,8 @@ oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes pr
 
 ### Transport selection (Controller and Agent)
 
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
 | `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard`, `https`, or `firebase`. Case-insensitive. |
 | `CLIPTUNNEL_REPEATER_URL` | — | yes (https) | Repeater URL, e.g. `https://repeater.example.com`. |
 | `CLIPTUNNEL_REPEATER_TOKEN` | — | yes (https) | Bearer token for repeater authentication. |
@@ -538,7 +540,7 @@ oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes pr
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | no | Heartbeat interval in seconds. `<= 0` disables. Works with both transports. |
+| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | no | Heartbeat interval in seconds. `<= 0` disables. Works with all transports. |
 
 ### Repeater service (repeater only)
 
@@ -595,9 +597,9 @@ The repeater is a **zero-knowledge relay**: it authenticates peers via bearer to
 
 ### AES-256-GCM encryption
 
-When `CLIPTUNNEL_AES_KEY` is set, `build_transport()` wraps the selected transport in `EncryptedTransport`, which encrypts the full CT3 wire string with AES-256-GCM before writing it to the transport, and decrypts it after reading. The format is `base64(nonce[12] ‖ ciphertext+tag[16])`. The repeater (or the clipboard) never sees plaintext.
+When `CLIPTUNNEL_AES_KEY` is set, `build_transport()` wraps the selected transport in `EncryptedTransport`, which encrypts the full CT3 wire string with AES-256-GCM before writing it to the transport, and decrypts it after reading. The format is `base64(nonce[12] ‖ ciphertext+tag[16])`. The repeater, the Firebase database, and the clipboard never see plaintext.
 
-This works with **any transport** — clipboard or HTTPS. The encryption layer is a decorator that sits between the Controller/Agent and the underlying transport.
+This works with **any transport** — clipboard, HTTPS, or Firebase. The encryption layer is a decorator that sits between the Controller/Agent and the underlying transport.
 
 Generate a key:
 
