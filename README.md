@@ -496,7 +496,7 @@ If `CLIPTUNNEL_AES_KEY` is not set, the transport passes plaintext (base64 CT3).
 
 ### Repeater service
 
-The repeater is a small stdlib-only HTTP service (no third-party deps):
+The repeater is a small stdlib-only HTTP service (no third-party deps). For production deployment with automatic HTTPS, see [`deploy/`](deploy/) for Docker + Caddy and Cloudflare Tunnel guides.
 
 ```bash
 # The repeater is stdlib-only (no additional deps), included in the core package.
