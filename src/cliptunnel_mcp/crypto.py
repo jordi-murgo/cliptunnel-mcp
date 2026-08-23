@@ -60,8 +60,8 @@ def decrypt(blob: str, key: bytes) -> str:
         raise ValueError(f"AES-256 key must be {_KEY_LEN} bytes, got {len(key)}")
 
     raw = base64.b64decode(blob)  # raises binascii.Error on invalid base64
-    if len(raw) < _NONCE_LEN:
-        raise ValueError("encrypted blob too short to contain a nonce")
+    if len(raw) < _NONCE_LEN + 16:  # nonce + minimum GCM auth tag
+        raise ValueError("encrypted blob too short to contain nonce and tag")
     nonce = raw[:_NONCE_LEN]
     ct = raw[_NONCE_LEN:]
     aesgcm = AESGCM(key)

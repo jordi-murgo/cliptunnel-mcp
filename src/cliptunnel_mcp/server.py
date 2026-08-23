@@ -32,6 +32,8 @@ import concurrent.futures
 import json
 import logging
 import os
+import shlex
+import sys
 import threading
 import time
 import uuid
@@ -858,9 +860,9 @@ def create_server():
             }
 
             prefix_parts = [
-                f"CLIPTUNNEL_TRANSPORT=https",
-                f"CLIPTUNNEL_REPEATER_URL={repeater_url}",
-                f"CLIPTUNNEL_REPEATER_TOKEN={agent_token}",
+                "CLIPTUNNEL_TRANSPORT=https",
+                f"CLIPTUNNEL_REPEATER_URL={shlex.quote(repeater_url)}",
+                f"CLIPTUNNEL_REPEATER_TOKEN={shlex.quote(agent_token)}",
             ]
             pip_command = "pip install cliptunnel-mcp"
 
@@ -875,7 +877,7 @@ def create_server():
             if aes_key_raw:
                 env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
                 result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={aes_key_raw}")
+                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
 
             agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
             result["agent_command"] = agent_command

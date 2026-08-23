@@ -162,11 +162,23 @@ class TestWaitForChange(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestSSE(unittest.TestCase):
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 5.0) -> bool:
+        """Poll *predicate* until true or timeout — deterministic, no fixed sleeps."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return predicate()
+
     def test_sse_event_updates_cache_and_revision(self) -> None:
         t, fake = make_transport()
         fake.post_slot("remote-value", token="t")
-        time.sleep(0.3)  # allow SSE thread to process
-        self.assertEqual(t.read(), "remote-value")
+        self.assertTrue(
+            self._wait_until(lambda: t.read() == "remote-value"),
+            "SSE thread did not process the remote write in time",
+        )
         self.assertGreaterEqual(t.revision, 1)
         t.close()
 
@@ -186,6 +198,8 @@ class TestSSE(unittest.TestCase):
     def test_sse_keepalive_noop(self) -> None:
         t, fake = make_transport()
         fake.push_keepalive()
+        # Give the SSE thread a moment to consume the keepalive comment;
+        # it must remain a no-op (no value, no revision change).
         time.sleep(0.1)
         self.assertEqual(t.read(), "")  # no write happened
         t.close()
@@ -193,11 +207,16 @@ class TestSSE(unittest.TestCase):
     def test_sse_reconnect_resyncs_via_snapshot(self) -> None:
         t, fake = make_transport()
         fake.post_slot("before-drop", token="t")
-        time.sleep(0.2)
+        self.assertTrue(
+            self._wait_until(lambda: t.read() == "before-drop"),
+            "initial SSE event not processed",
+        )
         fake.drop_all_streams()
         fake.post_slot("during-disconnect", token="t")
-        time.sleep(0.5)  # SSE thread reconnects and resyncs
-        self.assertEqual(t.read(), "during-disconnect")
+        self.assertTrue(
+            self._wait_until(lambda: t.read() == "during-disconnect", timeout=10.0),
+            "SSE reconnect + snapshot resync did not complete in time",
+        )
         t.close()
 
 

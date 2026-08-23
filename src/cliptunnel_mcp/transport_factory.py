@@ -41,6 +41,8 @@ def build_transport() -> Transport:
         transport: Transport = ClipboardTransport()
 
     elif choice == "https":
+        from urllib.parse import urlparse
+
         repeater_url = os.environ.get("CLIPTUNNEL_REPEATER_URL", "").strip()
         bearer_token = os.environ.get("CLIPTUNNEL_REPEATER_TOKEN", "").strip()
 
@@ -52,6 +54,12 @@ def build_transport() -> Transport:
         if missing:
             raise ValueError(
                 "CLIPTUNNEL_TRANSPORT=https requires: " + ", ".join(missing)
+            )
+
+        if urlparse(repeater_url).scheme.lower() != "https":
+            raise ValueError(
+                "CLIPTUNNEL_REPEATER_URL must use the https scheme "
+                f"(got: {repeater_url!r})"
             )
 
         from cliptunnel_mcp.https_transport import HttpsTransport

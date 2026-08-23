@@ -136,7 +136,10 @@ class _UrllibHttpClient:
     def open_stream(self, url: str, headers: dict[str, str]) -> StreamResponse:
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            resp = urllib.request.urlopen(req, timeout=None)
+            # Finite socket timeout: the repeater sends SSE keepalives every
+            # 15s, so a 60s timeout only fires on dead connections. This
+            # bounds close() latency instead of blocking forever.
+            resp = urllib.request.urlopen(req, timeout=60.0)
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
                 raise TransportAuthError(
@@ -312,10 +315,12 @@ class HttpsTransport:
         event_type = ""
         data_lines: list[str] = []
 
-        for line in stream:
+        for raw_line in stream:
             if not self._running:
                 break
-            line = line.rstrip("\n").rstrip("\r")
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
+            line = raw_line.rstrip("\n").rstrip("\r")
             if line.startswith(":"):
                 # comment / keepalive — no-op
                 continue
@@ -339,14 +344,31 @@ class HttpsTransport:
         self._sse_response = None
 
     def _handle_sse_write(self, payload: dict[str, object]) -> None:
-        """Process an SSE ``write`` event: update cache, bump revision."""
-        event_revision = payload.get("revision", 0)
-        value = payload.get("value", "")
+        """Process an SSE ``write`` event: update cache, bump revision.
 
+        If a revision gap is detected (events were dropped by a slow or
+        bounded subscriber queue), resynchronize from the ``GET /slot``
+        snapshot so the cache never stays permanently stale.
+        """
+        event_revision = int(payload.get("revision", 0))
+        value = str(payload.get("value", ""))
+
+        gap_detected = False
         with self._condition:
+            gap_detected = (
+                self._revision > 0 and event_revision > self._revision + 1
+            )
             self._value = value
             self._revision = max(self._revision, event_revision)
             self._condition.notify_all()
+
+        if gap_detected:
+            _log.warning(
+                "SSE revision gap detected (last=%d, got=%d); resyncing from snapshot",
+                self._revision,
+                event_revision,
+            )
+            self._resync_via_snapshot()
 
     # ------------------------------------------------------------------
     # Snapshot resync (called on reconnect)

@@ -92,6 +92,18 @@ class TestHttps(unittest.TestCase):
         finally:
             env.restore()
 
+    def test_https_rejects_http_url(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "http://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("https", str(ctx.exception))
+        finally:
+            env.restore()
+
     def test_https_missing_url_raises(self) -> None:
         env = _EnvGuard()
         try:
