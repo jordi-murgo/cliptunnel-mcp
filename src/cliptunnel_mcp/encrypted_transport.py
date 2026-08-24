@@ -51,6 +51,9 @@ class EncryptedTransport:
         raw = self._inner.read()
         if not raw:
             return raw
+        # Strip the CT3P prefix added on write.
+        if raw.startswith("CT3P|"):
+            raw = raw[5:]
         try:
             return crypto.decrypt(raw, self._aes_key)
         except (ValueError, Exception) as exc:
@@ -62,7 +65,9 @@ class EncryptedTransport:
     def write(self, value: str) -> None:
         """Encrypt and write the value to the inner transport."""
         blob = crypto.encrypt(value, self._aes_key)
-        self._inner.write(blob)
+        # Prefix with CT3P so the clipboard transport recognizes this as
+        # protocol traffic and does not back it up as user clipboard content.
+        self._inner.write(f"CT3P|{blob}")
 
     # ------------------------------------------------------------------
     # RevisionMonitor protocol (delegate to inner)

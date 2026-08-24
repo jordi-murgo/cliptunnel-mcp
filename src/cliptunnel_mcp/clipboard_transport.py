@@ -70,6 +70,9 @@ class ClipboardTransport:
     def _backup_candidate(text: str) -> str | None:
         """User-clipboard candidate: non-empty and not CT3 protocol traffic."""
         if text and not text.startswith(PROTOCOL_SIG):
+            # CT3P| is the encrypted protocol prefix (EncryptedTransport).
+            if text.startswith("CT3P|"):
+                return None
             return text
         return None
 
