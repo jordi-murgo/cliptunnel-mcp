@@ -45,7 +45,7 @@ graph LR
     Controller -- "CT3 wire<br/>(clipboard)" --> Agent2
 ```
 
-On startup each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends its sysinfo as a registration response to the broadcast address — no Controller announce needed. The Controller announces later when the MCP server starts (or when `discover()` is called), which triggers agents to re-register. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — the HTTPS transport does not touch the user's clipboard). The Agent also restores the user's clipboard after each registration, since registrations are fire-and-forget.
+On startup each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends its sysinfo as a registration response to the broadcast address — no Controller announce needed. The Controller announces later when the MCP server starts (or when `discover()` is called), which triggers agents to re-register. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread marks remotes `dead` if no heartbeat is received within ~420s (3.5× the default heartbeat interval) — no pings are sent. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — the HTTPS transport does not touch the user's clipboard). The Agent also restores the user's clipboard after each registration, since registrations are fire-and-forget.
 
 ### Wire format
 
@@ -120,21 +120,19 @@ Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` wit
 
 ### Keepalive
 
+The keepalive loop monitors the heartbeat-driven `last_seen` timestamp. It does not send pings — instead, it marks a remote `dead` if no heartbeat has been received within a dead threshold (3.5× the heartbeat interval, ~420s by default). Channel-level keepalive (WebSocket ping/pong, SSE) is handled by each transport independently.
+
 ```mermaid
 sequenceDiagram
     participant C as Controller
     participant A as Agent
 
-    Note over C: idle > 5 min detected
-    C->>A: CT3|C...|R...|seq|P| (ping)
-    A-->>C: CT3|R...|C...|seq|A| (ACK)
-    Note over C: last_seen updated
-
-    Note over C,A: no response 30s after ping
-    Note over C: status → dead
+    Note over A: heartbeat stops (crash, network loss)
+    Note over C: keepalive loop detects idle > 420s
+    Note over C: remote marked dead
 ```
 
-With the heartbeat active, the keepalive loop stays mostly idle — it only pings remotes that have stopped heartbeating, and is what ultimately marks a silent agent `dead`.
+With the heartbeat active, the keepalive loop rarely fires — it only marks remotes that have stopped heartbeating for over 7 minutes. A remote that resumes heartbeating is picked up by the registration upsert path and returns to `alive` status.
 
 ### Clipboard preservation
 
@@ -471,9 +469,8 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 - **One response at a time**: the Agent holds one pending response; retransmits until the Controller's ACK.
 - **Announce discovery**: the Controller broadcasts an ANNOUNCE when the MCP server starts (or on `remote_discovery`); agents re-register in response. Agents also register unsolicited on startup. Replies can collide on the shared slot; the heartbeat makes this self-healing.
 - **Heartbeat**: each Agent re-sends its registration every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) + jitter (0–15s); `<= 0` disables. The controller upserts the roster on every heartbeat.
-- **Keepalive**: Controller pings remotes after 5 min idle, marks dead if no response within 30s. With the heartbeat active, this only fires for agents that have stopped heartbeating.
 - **Clipboard preservation**: the clipboard transport backs up non-CT3 clipboard content; the Controller restores it (guarded) after the final ACK of every exchange; the Agent restores it after each registration (fire-and-forget, no controller response to clean the slot).
-- **Broadcast routing**: `to=*` messages are processed by all remotes with random backoff; no ACK.
+- **Keepalive**: the Controller marks remotes dead if no heartbeat is received within ~420s (3.5× default heartbeat). No pings are sent — the heartbeat is the liveness signal. Channel-level keepalive (WS ping/pong, SSE) is per-transport.
 - **Targeted routing**: `to=<R+7hex>` messages are processed only by that remote; others ignore.
 - **Stale message guard**: the Controller skips R/E with `seq <= min_seq`.
 - **Generation-safe**: closing and restarting never strands threads.
