@@ -225,7 +225,32 @@ class Agent:
             ))
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
+            # The agent wrote to the clipboard — it must restore the user's
+            # clipboard content. For directed registrations the controller
+            # ACKs and restores; for broadcast the agent is the last writer
+            # and must restore itself.
+            self._schedule_clipboard_restore()
 
+    def _schedule_clipboard_restore(self, delay: float = 0.5) -> None:
+        """Schedule a deferred restore of the user's clipboard.
+
+        Only applies to clipboard transports. Network transports are no-ops.
+        The delay gives the controller time to read the slot before we
+        overwrite it with the user's backed-up content.
+        """
+        restore = getattr(self._transport, "force_restore_user_clipboard", None)
+        if not callable(restore):
+            return
+        def _delayed_restore() -> None:
+            time.sleep(delay)
+            if self._running:
+                try:
+                    with self._slot_lock:
+                        restore()
+                    logger.debug("agent clipboard restored after registration")
+                except Exception:
+                    logger.debug("agent clipboard restore failed", exc_info=True)
+        threading.Thread(target=_delayed_restore, daemon=True, name="cliptunnel-clip-restore").start()
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
@@ -386,7 +411,9 @@ class Agent:
             mtype=MsgType.ACK.value,
             payload="",
         )))
-
+        # The controller will read this ACK and then write its next message.
+        # Restore the user's clipboard after a short delay.
+        self._schedule_clipboard_restore(delay=0.2)
         # Dedupe: duplicates are ACKed above; done ones replay the cached
         # response, in-flight ones are already being processed.
         if not self.tracker.should_process(msg.seq):
@@ -453,7 +480,8 @@ class Agent:
                 while self._running and self._pending_response == (seq, wire):
                     self._write_slot_safe(wire)
                     self._response_condition.wait(self.response_ack_timeout)
-
+            # Response was ACKed — restore the user's clipboard.
+            self._schedule_clipboard_restore(delay=0.1)
 
     # ── Slot access ──────────────────────────────────────────────────
 
