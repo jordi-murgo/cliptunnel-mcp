@@ -12,7 +12,6 @@ import unittest
 from unittest import mock
 
 from cliptunnel_mcp.clipboard_transport import ClipboardTransport
-from cliptunnel_mcp.encrypted_transport import EncryptedTransport
 from cliptunnel_mcp.firebase_transport import FirebaseTransport
 from cliptunnel_mcp.https_transport import HttpsTransport
 from cliptunnel_mcp.ws_transport import WebSocketTransport
@@ -167,7 +166,8 @@ class TestHttps(unittest.TestCase):
 
 
 class TestAESKey(unittest.TestCase):
-    def test_valid_aes_key_wraps_in_encrypted(self) -> None:
+    def test_valid_aes_key_returns_raw_transport(self) -> None:
+        """AES key is handled at protocol level now; factory returns raw transport."""
         env = _EnvGuard()
         try:
             env.set("CLIPTUNNEL_TRANSPORT", "https")
@@ -175,36 +175,24 @@ class TestAESKey(unittest.TestCase):
             env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
             env.set("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 32).decode())
             t = build_transport()
-            self.assertIsInstance(t, EncryptedTransport)
+            self.assertIsInstance(t, HttpsTransport)
             t.close()
         finally:
             env.restore()
 
-    def test_wrong_length_aes_key_raises(self) -> None:
+    def test_aes_key_does_not_affect_factory(self) -> None:
+        """Even a bad AES key does not raise in the factory (handled later)."""
         env = _EnvGuard()
         try:
             env.set("CLIPTUNNEL_TRANSPORT", "https")
             env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
             env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
             env.set("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 16).decode())
-            with self.assertRaises(ValueError) as ctx:
-                build_transport()
-            self.assertIn("32 bytes", str(ctx.exception))
+            t = build_transport()
+            self.assertIsInstance(t, HttpsTransport)
+            t.close()
         finally:
             env.restore()
-
-    def test_bad_base64_aes_key_raises(self) -> None:
-        env = _EnvGuard()
-        try:
-            env.set("CLIPTUNNEL_TRANSPORT", "https")
-            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
-            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
-            env.set("CLIPTUNNEL_AES_KEY", "!!!not-base64!!!")
-            with self.assertRaises(ValueError):
-                build_transport()
-        finally:
-            env.restore()
-
 
 class TestUnknown(unittest.TestCase):
     def test_unknown_transport_raises(self) -> None:
@@ -474,7 +462,7 @@ class TestWebSocket(unittest.TestCase):
         finally:
             env.restore()
 
-    def test_websocket_with_aes_key_returns_encrypted(self) -> None:
+    def test_websocket_with_aes_key_returns_raw_transport(self) -> None:
         import base64
         env = _EnvGuard()
         try:
@@ -482,9 +470,8 @@ class TestWebSocket(unittest.TestCase):
             env.set("CLIPTUNNEL_WS_URL", "ws://relay.example.com:9000")
             env.set("CLIPTUNNEL_WS_TOKEN", "secret")
             env.set("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 32).decode())
-            from cliptunnel_mcp.encrypted_transport import EncryptedTransport
             t = build_transport()
-            self.assertIsInstance(t, EncryptedTransport)
+            self.assertIsInstance(t, WebSocketTransport)
             t.close()
         finally:
             env.restore()

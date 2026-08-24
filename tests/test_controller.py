@@ -12,7 +12,7 @@ import threading
 import time
 import unittest
 
-from cliptunnel_mcp import Controller
+from cliptunnel_mcp import Controller, config
 from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
     Message,
@@ -26,12 +26,20 @@ TEST_REMOTE_ID = "R1a2b3c4"
 TEST_CONTROLLER_ID = "C1a2b3c4"
 
 
+def _aes_key() -> bytes | None:
+    raw = config.get_env("CLIPTUNNEL_AES_KEY")
+    if raw:
+        from cliptunnel_mcp import crypto
+        return crypto.parse_key(raw)
+    return None
+
+
 def wire(frm: str, to: str, seq: int, kind: MsgType, payload: str = "") -> str:
-    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload))
+    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload), aes_key=_aes_key())
 
 
 def is_message(value: str, kind: MsgType, seq: int) -> bool:
-    message = unpack(value)
+    message = unpack(value, aes_key=_aes_key())
     return message is not None and message.mtype == kind.value and message.seq == seq
 
 
@@ -63,7 +71,7 @@ class TestControllerConstruction(ControllerTestCase):
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ANNOUNCE, 1)
         )
-        message = unpack(value)
+        message = unpack(value, aes_key=_aes_key())
         assert message is not None
         self.assertEqual(message.frm, TEST_CONTROLLER_ID)
         self.assertEqual(message.to, BROADCAST_ADDR)
@@ -94,7 +102,7 @@ class TestControllerSendCommand(ControllerTestCase):
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.COMMAND, 1)
         )
-        message = unpack(value)
+        message = unpack(value, aes_key=_aes_key())
         assert message is not None
         self.assertEqual(message.frm, TEST_CONTROLLER_ID)
         self.assertEqual(message.to, TEST_REMOTE_ID)
@@ -155,7 +163,7 @@ class TestControllerSendCommand(ControllerTestCase):
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.COMMAND, 1)
         )
-        message = unpack(value)
+        message = unpack(value, aes_key=_aes_key())
         assert message is not None
         self.assertEqual(message.to, BROADCAST_ADDR)
 

@@ -41,6 +41,7 @@ from cliptunnel_mcp.protocol import (
     unpack,
     validate,
 )
+from cliptunnel_mcp import config
 from cliptunnel_mcp.transport import Transport
 
 
@@ -286,6 +287,13 @@ class Controller:
         ack_timeout: float = 5.0,
         initial_seq: int | None = None,
     ) -> None:
+        # Protocol-level AES key (None = plaintext mode).
+        aes_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+        if aes_raw:
+            from cliptunnel_mcp import crypto
+            self._aes_key: bytes | None = crypto.parse_key(aes_raw)
+        else:
+            self._aes_key = None
         self._transport = transport
         self.controller_id = controller_id or generate_controller_id()
         self.name = name or self.controller_id
@@ -387,7 +395,7 @@ class Controller:
             seq=seq,
             mtype=MsgType.ANNOUNCE.value,
             payload=json.dumps(announce_payload),
-        ))
+        ), aes_key=self._aes_key)
         with self._slot_lock:
             self._paced_write(wire)
 
@@ -513,7 +521,7 @@ class Controller:
                     seq=seq,
                     mtype=MsgType.COMMAND.value,
                     payload=command,
-                ))
+                ), aes_key=self._aes_key)
                 with self._slot_condition:
                     # Publish the exact pending seq atomically with the write
                     # so the reader can never observe the command first.
@@ -555,7 +563,7 @@ class Controller:
             last_raw = raw
             if not validate(raw, self.controller_id):
                 continue
-            msg = unpack(raw)
+            msg = unpack(raw, aes_key=self._aes_key)
             if msg is None:
                 continue
 
@@ -629,7 +637,7 @@ class Controller:
                         seq=msg.seq,
                         mtype=MsgType.ACK.value,
                         payload="",
-                    )))
+                    ), aes_key=self._aes_key))
                 with self._futures_lock:
                     future = self._futures.pop(msg.seq, None)
                 if future is not None and not future.done():
@@ -638,14 +646,7 @@ class Controller:
                     else:
                         future.set_result(msg.payload)
                 # The exchange ended — hand the clipboard back to the user.
-                # For broadcast registrations (no ACK sent), the clipboard
-                # holds the agent's message, not our self-write, so we need
-                # force_restore. For directed responses, our ACK is the last
-                # self-write, so the normal guard works.
-                if msg.to == BROADCAST_ADDR:
-                    self._force_restore_user_clipboard()
-                else:
-                    self._maybe_restore_user_clipboard()
+                self._maybe_restore_user_clipboard()
 
     def _maybe_restore_user_clipboard(self) -> None:
         """Restore the user's clipboard after an exchange, if still intact.
@@ -670,25 +671,6 @@ class Controller:
         if restored:
             logger.info("user clipboard restored after exchange")
 
-    def _force_restore_user_clipboard(self) -> None:
-        """Restore the user's clipboard without checking the self-write baseline.
-
-        Used for broadcast registrations where no ACK was sent, so the
-        clipboard still holds the agent's message.
-        """
-        restore = getattr(self._transport, "force_restore_user_clipboard", None)
-        if not callable(restore):
-            return
-        with self._slot_lock:
-            self._pace_write_gap()
-            try:
-                restored = restore()
-            except Exception:
-                logger.debug("user clipboard force-restore failed", exc_info=True)
-                return
-            self._last_write_time = time.monotonic()
-        if restored:
-            logger.info("user clipboard force-restored after broadcast registration")
 
     # ── Slot access ──────────────────────────────────────────────────
 

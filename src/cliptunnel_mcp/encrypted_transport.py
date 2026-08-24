@@ -1,36 +1,30 @@
-"""Optional AES-256-GCM encryption decorator for any transport.
+"""Deprecated thin pass-through transport decorator.
 
-Wraps any :class:`~cliptunnel_mcp.transport.Transport` + :class:`~cliptunnel_mcp.transport.RevisionMonitor`
-so that values are encrypted on write and decrypted on read. The inner
-transport carries opaque base64 blobs; the encryption is transparent to
-the Controller and Agent.
-
-When ``CLIPTUNNEL_AES_KEY`` is set, :func:`~cliptunnel_mcp.transport_factory.build_transport`
-composes this decorator around the selected transport.
+Encryption is now handled at the protocol level (:func:`~cliptunnel_mcp.protocol.pack`
+and :func:`~cliptunnel_mcp.protocol.unpack`) via the ``CT3E|`` wire format.
+This class is retained only for backward-compatibility with code that still
+wraps a transport in it; it delegates read/write to the inner transport with
+no encryption.
 """
 
 from __future__ import annotations
 
-from cliptunnel_mcp import crypto
 from cliptunnel_mcp.transport import Transport
 
 __all__ = ["EncryptedTransport"]
 
 
 class EncryptedTransport:
-    """Transport decorator that encrypts/decrypts with AES-256-GCM.
+    """Thin pass-through decorator — no encryption.
 
-    Implements :class:`Transport` (read/write) and :class:`RevisionMonitor`
-    (revision/wait_for_change) by delegating to the wrapped inner transport,
-    encrypting on write and decrypting on read.
-
-    :param inner: the underlying transport (ClipboardTransport, HttpsTransport, etc.)
-    :param aes_key: 32-byte AES-256 key.
+    All read/write/monitor calls delegate to the wrapped inner transport.
+    The ``aes_key`` parameter is accepted for backward compatibility but
+    has no effect.
     """
 
-    def __init__(self, inner: Transport, aes_key: bytes) -> None:
+    def __init__(self, inner: Transport, aes_key: bytes | None = None) -> None:
         self._inner = inner
-        self._aes_key = aes_key
+        self._aes_key = aes_key  # unused — kept for backward compat
 
     # ------------------------------------------------------------------
     # Transport protocol
@@ -39,7 +33,7 @@ class EncryptedTransport:
     @property
     def backend_name(self) -> str:
         inner_name = getattr(self._inner, "backend_name", "unknown")
-        return f"encrypted:{inner_name}"
+        return f"passthrough:{inner_name}"
 
     @property
     def endpoint(self) -> str | None:
@@ -47,34 +41,12 @@ class EncryptedTransport:
         return getattr(self._inner, "endpoint", None)
 
     def read(self) -> str:
-        """Read and decrypt the current value from the inner transport."""
-        raw = self._inner.read()
-        if not raw:
-            return raw
-        # Strip the CT3P prefix added on write.
-        if raw.startswith("CT3P|"):
-            raw = raw[5:]
-        try:
-            return crypto.decrypt(raw, self._aes_key)
-        except (ValueError, Exception) as exc:
-            # If decryption fails, return the raw value (might be plaintext
-            # from a pre-encryption era, or a corrupted blob).
-            # Log silently — the caller will see raw data.
-            return raw
+        """Read directly from the inner transport (no decryption)."""
+        return self._inner.read()
 
     def write(self, value: str) -> None:
-        """Encrypt and write the value to the inner transport."""
-        blob = crypto.encrypt(value, self._aes_key)
-        # Prefix with CT3P so the clipboard transport recognizes this as
-        # protocol traffic and does not back it up as user clipboard content.
-        self._inner.write(f"CT3P|{blob}")
-
-    def force_restore_user_clipboard(self) -> bool:
-        """Delegate clipboard restore to the inner transport."""
-        restore = getattr(self._inner, "force_restore_user_clipboard", None)
-        if callable(restore):
-            return restore()
-        return False
+        """Write directly to the inner transport (no encryption)."""
+        self._inner.write(value)
 
     # ------------------------------------------------------------------
     # RevisionMonitor protocol (delegate to inner)

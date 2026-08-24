@@ -132,6 +132,13 @@ class Agent:
         response_ack_timeout: float = 1.0,
         heartbeat_secs: float | None = None,
     ) -> None:
+        # Protocol-level AES key (None = plaintext mode).
+        aes_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+        if aes_raw:
+            from cliptunnel_mcp import crypto
+            self._aes_key: bytes | None = crypto.parse_key(aes_raw)
+        else:
+            self._aes_key = None
         self.remote_id = generate_remote_id()
         self.tracker = SeqTracker()
         self.poll_interval = poll_interval
@@ -222,35 +229,10 @@ class Agent:
                 seq=0,
                 mtype=MsgType.RESPONSE.value,
                 payload=sysinfo_result,
-            ))
+            ), aes_key=self._aes_key)
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
-            # The agent wrote to the clipboard — it must restore the user's
-            # clipboard content. For directed registrations the controller
-            # ACKs and restores; for broadcast the agent is the last writer
-            # and must restore itself.
-            self._schedule_clipboard_restore()
 
-    def _schedule_clipboard_restore(self, delay: float = 0.5) -> None:
-        """Schedule a deferred restore of the user's clipboard.
-
-        Only applies to clipboard transports. Network transports are no-ops.
-        The delay gives the controller time to read the slot before we
-        overwrite it with the user's backed-up content.
-        """
-        restore = getattr(self._transport, "force_restore_user_clipboard", None)
-        if not callable(restore):
-            return
-        def _delayed_restore() -> None:
-            time.sleep(delay)
-            if self._running:
-                try:
-                    with self._slot_lock:
-                        restore()
-                    logger.debug("agent clipboard restored after registration")
-                except Exception:
-                    logger.debug("agent clipboard restore failed", exc_info=True)
-        threading.Thread(target=_delayed_restore, daemon=True, name="cliptunnel-clip-restore").start()
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
@@ -328,7 +310,7 @@ class Agent:
             self._last_raw = raw
             return
 
-        msg = unpack(raw)
+        msg = unpack(raw, aes_key=self._aes_key)
         if msg is None:
             self._last_raw = raw
             return
@@ -359,7 +341,7 @@ class Agent:
                 seq=msg.seq,
                 mtype=MsgType.ACK.value,
                 payload="",
-            )))
+            ), aes_key=self._aes_key))
             self._last_raw = raw
             return
 
@@ -410,10 +392,8 @@ class Agent:
             seq=msg.seq,
             mtype=MsgType.ACK.value,
             payload="",
-        )))
+        ), aes_key=self._aes_key))
         # The controller will read this ACK and then write its next message.
-        # Restore the user's clipboard after a short delay.
-        self._schedule_clipboard_restore(delay=0.2)
         # Dedupe: duplicates are ACKed above; done ones replay the cached
         # response, in-flight ones are already being processed.
         if not self.tracker.should_process(msg.seq):
@@ -467,7 +447,7 @@ class Agent:
                 seq=seq,
                 mtype=mtype,
                 payload=payload,
-            ))
+            ), aes_key=self._aes_key)
 
             with self._response_condition:
                 # Wait for any previous response to be acked; a new command
@@ -480,8 +460,6 @@ class Agent:
                 while self._running and self._pending_response == (seq, wire):
                     self._write_slot_safe(wire)
                     self._response_condition.wait(self.response_ack_timeout)
-            # Response was ACKed — restore the user's clipboard.
-            self._schedule_clipboard_restore(delay=0.1)
 
     # ── Slot access ──────────────────────────────────────────────────
 

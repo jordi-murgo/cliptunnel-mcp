@@ -1,24 +1,18 @@
-"""Tests for EncryptedTransport — AES-256-GCM decorator over any transport.
+"""Tests for EncryptedTransport — now a thin pass-through decorator.
 
-TDD: tests written first (RED), then EncryptedTransport implemented (GREEN),
-then edge cases (TRIANGULATE).
+Encryption is handled at the protocol level (pack/unpack with aes_key).
+EncryptedTransport is kept for backward compatibility but delegates
+read/write to the inner transport with no encryption.
 """
 
 from __future__ import annotations
 
-import base64
-import os
 import threading
 import time
 import unittest
 
-from cliptunnel_mcp.crypto import decrypt, encrypt
 from cliptunnel_mcp.encrypted_transport import EncryptedTransport
 from tests.clipboard_slot import ClipboardSlot
-
-
-def _random_key() -> bytes:
-    return os.urandom(32)
 
 
 class _FakeTransport:
@@ -30,6 +24,10 @@ class _FakeTransport:
     @property
     def backend_name(self) -> str:
         return "fake"
+
+    @property
+    def endpoint(self) -> str | None:
+        return None
 
     def read(self) -> str:
         return self._slot.read()
@@ -52,54 +50,50 @@ class TestProtocolConformance(unittest.TestCase):
     def test_is_transport(self) -> None:
         from cliptunnel_mcp.transport import Transport
 
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         self.assertIsInstance(t, Transport)
 
     def test_backend_name_prefixed(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
-        self.assertEqual(t.backend_name, "encrypted:fake")
+        t = EncryptedTransport(_FakeTransport())
+        self.assertEqual(t.backend_name, "passthrough:fake")
 
 
-class TestEncryptDecryptRoundTrip(unittest.TestCase):
-    def test_write_then_read_recovers_plaintext(self) -> None:
+class TestPassThroughReadWrite(unittest.TestCase):
+    def test_write_then_read_returns_plaintext(self) -> None:
         inner = _FakeTransport()
-        key = _random_key()
-        t = EncryptedTransport(inner, key)
+        t = EncryptedTransport(inner)
         t.write("hello world")
         self.assertEqual(t.read(), "hello world")
 
-    def test_write_encrypts_on_inner(self) -> None:
+    def test_inner_holds_plaintext(self) -> None:
         inner = _FakeTransport()
-        key = _random_key()
-        t = EncryptedTransport(inner, key)
-        t.write("secret plaintext")
-        # Inner holds encrypted blob, not plaintext.
-        self.assertNotEqual(inner.read(), "secret plaintext")
-        # And it's a valid AES blob that decrypts back.
-        self.assertEqual(decrypt(inner.read(), key), "secret plaintext")
+        t = EncryptedTransport(inner)
+        t.write("plaintext data")
+        # Pass-through: inner holds exactly what was written
+        self.assertEqual(inner.read(), "plaintext data")
 
     def test_round_trip_unicode(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         plaintext = "hélïpö — 日本語 — 🎉"
         t.write(plaintext)
         self.assertEqual(t.read(), plaintext)
 
     def test_round_trip_empty(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         t.write("")
         self.assertEqual(t.read(), "")
 
     def test_multiple_writes(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         t.write("a")
         self.assertEqual(t.read(), "a")
         t.write("b")
         self.assertEqual(t.read(), "b")
-        t.write("c")
-        self.assertEqual(t.read(), "c")
 
+
+class TestRevision(unittest.TestCase):
     def test_revision_bumps_on_write(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         self.assertEqual(t.revision, 0)
         t.write("a")
         self.assertEqual(t.revision, 1)
@@ -109,7 +103,7 @@ class TestEncryptDecryptRoundTrip(unittest.TestCase):
 
 class TestWaitForChange(unittest.TestCase):
     def test_wait_returns_on_write(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         rev = t.revision
 
         def delayed_write() -> None:
@@ -121,52 +115,80 @@ class TestWaitForChange(unittest.TestCase):
         self.assertGreater(result, rev)
 
     def test_wait_times_out_without_raise(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         result = t.wait_for_change(t.revision, timeout=0.2)
         self.assertEqual(result, t.revision)
 
 
 class TestDelegation(unittest.TestCase):
     def test_close_delegates_to_inner(self) -> None:
-        closed = []
+        closed: list[bool] = []
 
-        class CloseableTransport(_FakeTransport):
+        class CloseableTransport:
+            backend_name = "closeable"
+            endpoint = None
+            revision = 0
+
+            def read(self) -> str:
+                return ""
+
+            def write(self, value: str) -> None:
+                pass
+
+            def wait_for_change(self, after: int, timeout: float = 1.0) -> int:
+                return 0
+
             def close(self) -> None:
                 closed.append(True)
 
-        t = EncryptedTransport(CloseableTransport(), _random_key())
+        t = EncryptedTransport(CloseableTransport())
         t.close()
         self.assertEqual(closed, [True])
 
     def test_close_idempotent(self) -> None:
-        t = EncryptedTransport(_FakeTransport(), _random_key())
+        t = EncryptedTransport(_FakeTransport())
         t.close()
         t.close()  # no exception
 
-    def test_restore_user_clipboard_delegates(self) -> None:
-        restored = []
+    def test_restore_delegates_to_inner(self) -> None:
+        restored: list[bool] = []
 
-        class RestorableTransport(_FakeTransport):
+        class RestorableTransport:
+            backend_name = "restorable"
+            endpoint = None
+            revision = 0
+
+            def read(self) -> str:
+                return ""
+
+            def write(self, value: str) -> None:
+                pass
+
+            def wait_for_change(self, after: int, timeout: float = 1.0) -> int:
+                return 0
+
+            def close(self) -> None:
+                pass
+
             def restore_user_clipboard(self) -> bool:
                 restored.append(True)
                 return True
 
-        t = EncryptedTransport(RestorableTransport(), _random_key())
+        t = EncryptedTransport(RestorableTransport())
         self.assertTrue(t.restore_user_clipboard())
         self.assertEqual(restored, [True])
 
 
 class TestWithClipboardTransport(unittest.TestCase):
-    """Integration: EncryptedTransport works over a real ClipboardTransport-like slot."""
+    """Integration: EncryptedTransport passes through over a ClipboardSlot."""
 
-    def test_encrypted_clipboard_round_trip(self) -> None:
+    def test_passthrough_clipboard_round_trip(self) -> None:
         inner = _FakeTransport()
-        key = _random_key()
-        t = EncryptedTransport(inner, key)
-        t.write("clipboard-encrypted-payload")
-        self.assertEqual(t.read(), "clipboard-encrypted-payload")
-        # The slot holds an encrypted blob, not plaintext.
-        self.assertNotEqual(inner.read(), "clipboard-encrypted-payload")
+        t = EncryptedTransport(inner)
+        t.write("clipboard-payload")
+        self.assertEqual(t.read(), "clipboard-payload")
+        # The slot holds exactly what was written (no encryption)
+        self.assertEqual(inner.read(), "clipboard-payload")
 
 
 if __name__ == "__main__":

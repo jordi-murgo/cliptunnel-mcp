@@ -8,10 +8,9 @@ built-in default. ``CLIPTUNNEL_TRANSPORT`` selects ``clipboard``
 ``https`` → :class:`~cliptunnel_mcp.https_transport.HttpsTransport`.
 ``firebase`` → :class:`~cliptunnel_mcp.firebase_transport.FirebaseTransport`.
 
-If ``CLIPTUNNEL_AES_KEY`` is set (base64 of 32 bytes), the selected transport
-is wrapped in :class:`~cliptunnel_mcp.encrypted_transport.EncryptedTransport`
-so that all values are encrypted with AES-256-GCM before entering the
-transport and decrypted on read. This works with any transport.
+Encryption is handled at the protocol level (:func:`~cliptunnel_mcp.protocol.pack`
+and :func:`~cliptunnel_mcp.protocol.unpack`) when ``CLIPTUNNEL_AES_KEY`` is set,
+not at the transport level.
 
 All imports are lazy (inside the function body) so importing this module
 never pulls in ``clipboard-event`` or ``cryptography`` at import time.
@@ -29,8 +28,7 @@ def build_transport() -> Transport:
     """Build the transport selected by ``CLIPTUNNEL_TRANSPORT`` (or its
     ``[transport] type`` config-file equivalent).
 
-    If ``CLIPTUNNEL_AES_KEY`` is set, the transport is wrapped in
-    :class:`~cliptunnel_mcp.encrypted_transport.EncryptedTransport`.
+    Returns the raw transport; encryption is handled at the protocol level.
 
     Raises :class:`ValueError` for unknown transport selectors or missing
     required settings.
@@ -135,15 +133,4 @@ def build_transport() -> Transport:
             f"CLIPTUNNEL_TRANSPORT='{choice}' is not supported. "
             f"Accepted values: {', '.join(sorted(_ACCEPTED))}"
         )
-    # --- Optional AES encryption layer (works with any transport) ---
-    aes_env = config.get_env("CLIPTUNNEL_AES_KEY")
-    if aes_env:
-        from cliptunnel_mcp.crypto import parse_key
-
-        aes_key = parse_key(aes_env)  # raises ValueError on bad key
-
-        from cliptunnel_mcp.encrypted_transport import EncryptedTransport
-
-        transport = EncryptedTransport(transport, aes_key)
-
     return transport
