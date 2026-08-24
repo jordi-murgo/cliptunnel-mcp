@@ -225,6 +225,28 @@ class Agent:
             ))
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
+            # Schedule a deferred clipboard restore so the user's clipboard
+            # is not left with CT3 protocol traffic. The controller reads
+            # the slot within ~100ms; we restore after a short delay.
+            self._schedule_clipboard_restore()
+
+    def _schedule_clipboard_restore(self, delay: float = 0.5) -> None:
+        """Schedule a deferred restore of the user's clipboard.
+
+        Only applies to clipboard transports. Network transports are no-ops.
+        """
+        restore = getattr(self._transport, "force_restore_user_clipboard", None)
+        if not callable(restore):
+            return
+        def _delayed_restore() -> None:
+            time.sleep(delay)
+            if self._running:
+                try:
+                    with self._slot_lock:
+                        restore()
+                except Exception:
+                    logger.debug("deferred clipboard restore failed", exc_info=True)
+        threading.Thread(target=_delayed_restore, daemon=True, name="cliptunnel-clip-restore").start()
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
