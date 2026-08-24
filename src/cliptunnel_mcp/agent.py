@@ -40,7 +40,7 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.transport import Transport
 
-from cliptunnel_mcp import config
+from cliptunnel_mcp import __version__, config
 
 
 logger = logging.getLogger("cliptunnel-agent")
@@ -518,7 +518,7 @@ def main() -> None:
     from cliptunnel_mcp.transport_factory import build_transport
     from cliptunnel_mcp.operations import dispatch as handler
     transport = build_transport()
-    logger.info("starting agent on %s transport", transport.backend_name)
+    logger.info("starting agent on %s transport (cliptunnel-mcp %s)", transport.backend_name, __version__)
     agent = Agent(transport, handler)
     logger.info("agent running — remote_id=%s — press Ctrl+C to stop", agent.remote_id)
 
