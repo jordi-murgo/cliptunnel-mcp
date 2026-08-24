@@ -69,6 +69,13 @@ class EncryptedTransport:
         # protocol traffic and does not back it up as user clipboard content.
         self._inner.write(f"CT3P|{blob}")
 
+    def force_restore_user_clipboard(self) -> bool:
+        """Delegate clipboard restore to the inner transport."""
+        restore = getattr(self._inner, "force_restore_user_clipboard", None)
+        if callable(restore):
+            return restore()
+        return False
+
     # ------------------------------------------------------------------
     # RevisionMonitor protocol (delegate to inner)
     # ------------------------------------------------------------------
