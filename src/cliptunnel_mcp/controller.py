@@ -693,14 +693,18 @@ class Controller:
                                 }
                     except (json.JSONDecodeError, TypeError):
                         pass
-                # ACK the response back so the remote stops retransmitting.
-                self._paced_write(pack(Message(
-                    frm=self.controller_id,
-                    to=msg.frm,
-                    seq=msg.seq,
-                    mtype=MsgType.ACK.value,
-                    payload="",
-                )))
+                # Broadcast registrations (heartbeat) do not need an ACK —
+                # they are fire-and-forget. Directed responses get an ACK so
+                # the remote stops retransmitting.
+                if msg.to != BROADCAST_ADDR:
+                    # ACK the response back so the remote stops retransmitting.
+                    self._paced_write(pack(Message(
+                        frm=self.controller_id,
+                        to=msg.frm,
+                        seq=msg.seq,
+                        mtype=MsgType.ACK.value,
+                        payload="",
+                    )))
                 with self._futures_lock:
                     future = self._futures.pop(msg.seq, None)
                 if future is not None and not future.done():
@@ -708,8 +712,7 @@ class Controller:
                         future.set_result(None)
                     else:
                         future.set_result(msg.payload)
-                # The ACK-back above ended the exchange — the slot is free,
-                # so hand the clipboard back to the user.
+                # The exchange ended — hand the clipboard back to the user.
                 self._maybe_restore_user_clipboard()
 
     def _maybe_restore_user_clipboard(self) -> None:

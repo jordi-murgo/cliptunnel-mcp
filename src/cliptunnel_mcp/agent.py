@@ -225,9 +225,6 @@ class Agent:
             ))
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
-            # Restore user clipboard after writing our registration,
-            # so the heartbeat does not clobber the user's clipboard.
-            self._maybe_restore_user_clipboard()
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
@@ -455,20 +452,6 @@ class Agent:
                 while self._running and self._pending_response == (seq, wire):
                     self._write_slot_safe(wire)
                     self._response_condition.wait(self.response_ack_timeout)
-
-    def _maybe_restore_user_clipboard(self) -> None:
-        """Restore the user's clipboard after a write, if still intact.
-
-        Only applies to clipboard transports; no-op for network transports.
-        """
-        restore = getattr(self._transport, "restore_user_clipboard", None)
-        if not callable(restore):
-            return
-        try:
-            with self._slot_lock:
-                restore()
-        except Exception:
-            logger.debug("agent user clipboard restore failed", exc_info=True)
 
 
     # ── Slot access ──────────────────────────────────────────────────
