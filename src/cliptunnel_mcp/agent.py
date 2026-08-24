@@ -197,8 +197,10 @@ class Agent:
     def send_registration(self, controller_id: str | None = None) -> None:
         """Send a registration response with current sysinfo to a controller.
 
-        If *controller_id* is None, sends to all known controllers (or
-        falls back to the legacy ``CONTROLLER_ADDR`` if none are known).
+        If *controller_id* is None, sends a single broadcast registration
+        so all known controllers (and any new ones) receive it. This is
+        used by the heartbeat. If a specific controller_id is given, the
+        registration is directed to that controller only.
         """
         from cliptunnel_mcp.operations import dispatch
         req = {"op": "sysinfo"}
@@ -207,10 +209,12 @@ class Agent:
         if self._transport_endpoint:
             req["_transport_endpoint"] = self._transport_endpoint
         sysinfo_result, _ = dispatch(json.dumps(req))
-        targets = self._known_controllers if controller_id is None else {controller_id}
-        if not targets:
-            # Fallback: send to legacy C address (backward compat).
-            targets = {CONTROLLER_ADDR}
+        if controller_id is not None:
+            # Directed registration to a specific controller.
+            targets = [controller_id]
+        else:
+            # Heartbeat: single broadcast so all controllers see it.
+            targets = [BROADCAST_ADDR]
         for cid in targets:
             wire = pack(Message(
                 frm=self.remote_id,
@@ -221,6 +225,9 @@ class Agent:
             ))
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
+            # Restore user clipboard after writing our registration,
+            # so the heartbeat does not clobber the user's clipboard.
+            self._maybe_restore_user_clipboard()
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
@@ -448,6 +455,21 @@ class Agent:
                 while self._running and self._pending_response == (seq, wire):
                     self._write_slot_safe(wire)
                     self._response_condition.wait(self.response_ack_timeout)
+
+    def _maybe_restore_user_clipboard(self) -> None:
+        """Restore the user's clipboard after a write, if still intact.
+
+        Only applies to clipboard transports; no-op for network transports.
+        """
+        restore = getattr(self._transport, "restore_user_clipboard", None)
+        if not callable(restore):
+            return
+        try:
+            with self._slot_lock:
+                restore()
+        except Exception:
+            logger.debug("agent user clipboard restore failed", exc_info=True)
+
 
     # ── Slot access ──────────────────────────────────────────────────
 
