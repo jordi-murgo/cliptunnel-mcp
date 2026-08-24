@@ -457,20 +457,25 @@ class Agent:
 
     # ── Slot access ──────────────────────────────────────────────────
 
-    def _write_slot_safe(self, wire: str) -> None:
+    def _write_slot_safe(self, wire: str, max_retries: int = 10) -> None:
         """Write to the slot and update _last_raw atomically.
 
-        Catches clipboard write failures so a transient clipboard lock
-        (Citrix, EDR) does not crash the responder thread.  The caller's
-        retransmission loop will retry on the next tick.
+        Catches clipboard write failures (Citrix contention, EDR locks) and
+        retries with exponential backoff up to *max_retries* times.
         """
-        try:
-            with self._slot_lock:
-                self._transport.write(wire)
-                self._last_raw = wire
-        except Exception:
-            logger.warning("clipboard write failed — will retry", exc_info=True)
-            time.sleep(0.5)
+        for attempt in range(max_retries):
+            try:
+                with self._slot_lock:
+                    self._transport.write(wire)
+                    self._last_raw = wire
+                return
+            except Exception:
+                if attempt + 1 >= max_retries:
+                    logger.error("clipboard write failed after %d retries — giving up", max_retries, exc_info=True)
+                    return
+                delay = min(0.1 * (2 ** attempt), 2.0)
+                logger.warning("clipboard write failed (attempt %d/%d) — retrying in %.1fs", attempt + 1, max_retries, delay, exc_info=True)
+                time.sleep(delay)
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 

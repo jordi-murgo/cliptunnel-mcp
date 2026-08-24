@@ -464,7 +464,13 @@ class Controller:
                         continue
 
                     if idle > _PING_IDLE:
-                        # Idle too long — send a ping
+                        # Only ping on non-clipboard transports — clipboard
+                        # uses the heartbeat and clipboard contention makes
+                        # pings unreliable.
+                        backend = getattr(self._transport, "backend_name", "")
+                        if backend.startswith("clipboard"):
+                            info["last_seen"] = now
+                            continue
                         self.seq += 1
                         ping_seq = self.seq
                         wire = pack(Message(
