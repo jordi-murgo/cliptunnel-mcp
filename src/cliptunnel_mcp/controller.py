@@ -428,15 +428,15 @@ class Controller:
         return {"controllers": controllers, "remotes": remotes}
 
     def _keepalive_loop(self) -> None:
-        """Background thread: ping idle remotes, mark dead ones.
+        """Background thread: mark remotes dead when heartbeat stops.
 
-        - Ping a remote only after 5 minutes (300s) of inactivity.
-        - If no response or ACK within 30s of the ping, mark as dead.
-        - The 10s loop interval is just the poll cycle; actual ping timing
-          is driven by last_seen, not the loop interval.
+        The agent heartbeat (every CLIPTUNNEL_HEARTBEAT_SECS, default 120s)
+        updates ``last_seen``. If a remote is idle beyond the dead threshold
+        (heartbeat interval * 3 + jitter margin), it is marked dead without
+        sending a ping. Channel-level keepalive (WS ping/pong, SSE) is
+        handled by each transport independently.
         """
-        _PING_IDLE = 300.0    # ping after 5 min idle
-        _DEAD_TIMEOUT = 30.0  # dead if no response 30s after ping
+        _DEAD_IDLE = 420.0     # 3.5x default heartbeat (120s + 60s margin)
         _LOOP_INTERVAL = 10.0
 
         while self._running:
@@ -446,44 +446,14 @@ class Controller:
             now = time.time()
             with self._registry_lock:
                 for remote_id, info in list(self._remotes.items()):
-                    last_seen = info.get("last_seen", 0)
-                    idle = now - last_seen
                     status = info.get("status", "alive")
-                    ping_sent_at = info.get("ping_sent_at")
-
                     if status == "dead":
                         continue
-
-                    if ping_sent_at is not None:
-                        # We sent a ping — check if it timed out
-                        if now - ping_sent_at > _DEAD_TIMEOUT:
-                            info["status"] = "dead"
-                            info["ping_sent_at"] = None
-                            logger.info("remote %s marked dead (no response to ping in %.0fs)", remote_id, _DEAD_TIMEOUT)
-                        # Still waiting for ping response — don't send another
-                        continue
-
-                    if idle > _PING_IDLE:
-                        # Only ping on non-clipboard transports — clipboard
-                        # uses the heartbeat and clipboard contention makes
-                        # pings unreliable.
-                        backend = getattr(self._transport, "backend_name", "")
-                        if backend.startswith("clipboard"):
-                            info["last_seen"] = now
-                            continue
-                        self.seq += 1
-                        ping_seq = self.seq
-                        wire = pack(Message(
-                            frm=self.controller_id,
-                            to=remote_id,
-                            seq=ping_seq,
-                            mtype=MsgType.PING.value,
-                            payload="",
-                        ))
-                        with self._slot_lock:
-                            self._paced_write(wire)
-                        info["ping_sent_at"] = now
-                        logger.info("ping sent to %s (idle %.0fs)", remote_id, idle)
+                    last_seen = info.get("last_seen", 0)
+                    idle = now - last_seen
+                    if idle > _DEAD_IDLE:
+                        info["status"] = "dead"
+                        logger.info("remote %s marked dead (no heartbeat for %.0fs)", remote_id, idle)
 
     def send_command(self, command: str, remote_id: str | None = None) -> concurrent.futures.Future:
         """Send *command* asynchronously — returns a Future immediately.
