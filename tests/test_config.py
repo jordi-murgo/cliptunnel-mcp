@@ -184,5 +184,81 @@ class TestCacheIsolation(ConfigTestCase):
         self.assertEqual(config.get_copilot_token(config_path=path), "gho_second")
 
 
+class TestEnvToFileWebSocket(unittest.TestCase):
+    def test_ws_url_in_env_to_file(self) -> None:
+        self.assertIn("CLIPTUNNEL_WS_URL", config.ENV_TO_FILE)
+        self.assertEqual(config.ENV_TO_FILE["CLIPTUNNEL_WS_URL"], (("transport",), "ws_url"))
+
+    def test_ws_token_in_env_to_file(self) -> None:
+        self.assertIn("CLIPTUNNEL_WS_TOKEN", config.ENV_TO_FILE)
+        self.assertEqual(config.ENV_TO_FILE["CLIPTUNNEL_WS_TOKEN"], (("transport",), "ws_token"))
+
+    def test_get_env_ws_url_from_config_file(self) -> None:
+        config_content = '''\
+[transport]
+type = "websocket"
+ws_url = "ws://config-file.example.com:9000"
+ws_token = "config-token"
+'''
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False
+        ) as f:
+            f.write(config_content)
+            f.flush()
+            config_path = f.name
+
+        old_env = os.environ.pop("CLIPTUNNEL_WS_URL", None)
+        old_config = os.environ.get("CLIPTUNNEL_CONFIG")
+        os.environ["CLIPTUNNEL_CONFIG"] = config_path
+        try:
+            result = config.get_env("CLIPTUNNEL_WS_URL", "")
+            self.assertEqual(result, "ws://config-file.example.com:9000")
+        finally:
+            if old_env is not None:
+                os.environ["CLIPTUNNEL_WS_URL"] = old_env
+            if old_config is not None:
+                os.environ["CLIPTUNNEL_CONFIG"] = old_config
+            else:
+                os.environ.pop("CLIPTUNNEL_CONFIG", None)
+            os.unlink(config_path)
+
+    def test_env_var_overrides_config_file_for_ws_url(self) -> None:
+        config_content = '''\
+[transport]
+ws_url = "ws://config.example.com"
+'''
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False
+        ) as f:
+            f.write(config_content)
+            f.flush()
+            config_path = f.name
+
+        old_env = os.environ.get("CLIPTUNNEL_WS_URL")
+        old_config = os.environ.get("CLIPTUNNEL_CONFIG")
+        os.environ["CLIPTUNNEL_WS_URL"] = "ws://env-wins.example.com"
+        os.environ["CLIPTUNNEL_CONFIG"] = config_path
+        try:
+            result = config.get_env("CLIPTUNNEL_WS_URL", "")
+            self.assertEqual(result, "ws://env-wins.example.com")
+        finally:
+            if old_env is not None:
+                os.environ["CLIPTUNNEL_WS_URL"] = old_env
+            else:
+                os.environ.pop("CLIPTUNNEL_WS_URL", None)
+            if old_config is not None:
+                os.environ["CLIPTUNNEL_CONFIG"] = old_config
+            else:
+                os.environ.pop("CLIPTUNNEL_CONFIG", None)
+            os.unlink(config_path)
+
+    def test_existing_entries_unchanged(self) -> None:
+        self.assertEqual(
+            config.ENV_TO_FILE["CLIPTUNNEL_REPEATER_URL"], (("transport",), "repeater_url")
+        )
+        self.assertEqual(
+            config.ENV_TO_FILE["CLIPTUNNEL_AES_KEY"], (("encryption",), "aes_key")
+        )
+
 if __name__ == "__main__":
     unittest.main()

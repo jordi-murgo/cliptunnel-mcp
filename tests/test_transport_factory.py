@@ -15,8 +15,8 @@ from cliptunnel_mcp.clipboard_transport import ClipboardTransport
 from cliptunnel_mcp.encrypted_transport import EncryptedTransport
 from cliptunnel_mcp.firebase_transport import FirebaseTransport
 from cliptunnel_mcp.https_transport import HttpsTransport
+from cliptunnel_mcp.ws_transport import WebSocketTransport
 from cliptunnel_mcp.transport_factory import build_transport
-
 
 def _clipboard_available() -> bool:
     """True if a real ClipboardTransport can be constructed on this host.
@@ -40,6 +40,13 @@ class _EnvGuard:
 
     def __init__(self) -> None:
         self._saved: dict[str, str] = {}
+        # Point CLIPTUNNEL_CONFIG to an empty file so the default
+        # ~/.cliptunnel/config.toml doesn't interfere with factory tests.
+        import tempfile
+        self._saved.setdefault("CLIPTUNNEL_CONFIG", os.environ.get("CLIPTUNNEL_CONFIG", ""))
+        self._empty_config = tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False)
+        self._empty_config.close()
+        os.environ["CLIPTUNNEL_CONFIG"] = self._empty_config.name
 
     def set(self, key: str, value: str) -> None:
         if key not in self._saved:
@@ -56,7 +63,10 @@ class _EnvGuard:
             if value == "" and key not in os.environ:
                 continue
             os.environ[key] = value
-
+        try:
+            os.unlink(self._empty_config.name)
+        except OSError:
+            pass
 
 class TestDefaults(unittest.TestCase):
     @unittest.skipUnless(_CLIPBOARD_OK, "clipboard backend not available on this host")
@@ -364,6 +374,132 @@ class TestFirebaseEnv(unittest.TestCase):
         finally:
             env.restore()
 
+
+
+class TestWebSocketValidation(unittest.TestCase):
+    """Tests that validate env vars without creating a transport (no websockets needed)."""
+
+    def test_websocket_missing_url_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.delete("CLIPTUNNEL_WS_URL")
+            env.set("CLIPTUNNEL_WS_TOKEN", "secret")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_WS_URL", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_websocket_missing_token_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.set("CLIPTUNNEL_WS_URL", "ws://relay.example.com:9000")
+            env.delete("CLIPTUNNEL_WS_TOKEN")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_WS_TOKEN", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_websocket_missing_both_raises(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.delete("CLIPTUNNEL_WS_URL")
+            env.delete("CLIPTUNNEL_WS_TOKEN")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("CLIPTUNNEL_WS_URL", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_websocket_rejects_http_scheme(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.set("CLIPTUNNEL_WS_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_WS_TOKEN", "secret")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("ws://", str(ctx.exception))
+        finally:
+            env.restore()
+
+    def test_unknown_transport_includes_websocket_in_message(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "carrier-pigeon")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            self.assertIn("websocket", str(ctx.exception))
+        finally:
+            env.restore()
+
+
+class TestWebSocket(unittest.TestCase):
+    def test_websocket_returns_ws_transport(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.set("CLIPTUNNEL_WS_URL", "ws://relay.example.com:9000")
+            env.set("CLIPTUNNEL_WS_TOKEN", "secret")
+            t = build_transport()
+            self.assertIsInstance(t, WebSocketTransport)
+            t.close()
+        finally:
+            env.restore()
+    def test_websocket_case_insensitive(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "WEBSOCKET")
+            env.set("CLIPTUNNEL_WS_URL", "ws://relay.example.com:9000")
+            env.set("CLIPTUNNEL_WS_TOKEN", "secret")
+            t = build_transport()
+            self.assertIsInstance(t, WebSocketTransport)
+            t.close()
+        finally:
+            env.restore()
+
+    def test_websocket_wss_scheme_accepted(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.set("CLIPTUNNEL_WS_URL", "wss://relay.example.com")
+            env.set("CLIPTUNNEL_WS_TOKEN", "secret")
+            t = build_transport()
+            self.assertIsInstance(t, WebSocketTransport)
+            t.close()
+        finally:
+            env.restore()
+
+    def test_websocket_with_aes_key_returns_encrypted(self) -> None:
+        import base64
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "websocket")
+            env.set("CLIPTUNNEL_WS_URL", "ws://relay.example.com:9000")
+            env.set("CLIPTUNNEL_WS_TOKEN", "secret")
+            env.set("CLIPTUNNEL_AES_KEY", base64.b64encode(b"0" * 32).decode())
+            from cliptunnel_mcp.encrypted_transport import EncryptedTransport
+            t = build_transport()
+            self.assertIsInstance(t, EncryptedTransport)
+            t.close()
+        finally:
+            env.restore()
+    def test_existing_https_branch_unchanged(self) -> None:
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "https")
+            env.set("CLIPTUNNEL_REPEATER_URL", "https://relay.example.com")
+            env.set("CLIPTUNNEL_REPEATER_TOKEN", "secret")
+            from cliptunnel_mcp.https_transport import HttpsTransport
+            t = build_transport()
+            self.assertIsInstance(t, HttpsTransport)
+            t.close()
+        finally:
+            env.restore()
 
 if __name__ == "__main__":
     unittest.main()
