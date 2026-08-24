@@ -130,7 +130,6 @@ class ServerTestCase(unittest.TestCase):
             retries=3,
             poll_interval=0.001,
             initial_seq=0,
-            persist_seq=False,
             controller_id="C1a2b3c4",
         )
         server.set_controller(self.controller)

@@ -119,6 +119,23 @@ class ClipboardTransport:
             return False
         return True
 
+    def force_restore_user_clipboard(self) -> bool:
+        """Restore the user clipboard without checking the self-write baseline.
+
+        Used after processing broadcast registrations where the controller
+        did not write an ACK, so the clipboard still holds the agent's
+        message rather than the controller's last self-write.
+        """
+        with self._condition:
+            backup = self._user_backup
+        if not backup:
+            return False
+        try:
+            self.write(backup)
+        except Exception:
+            return False
+        return True
+
     # ── RevisionMonitor interface ────────────────────────────────────
 
     @property

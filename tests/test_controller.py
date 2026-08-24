@@ -1,26 +1,20 @@
 """Controller endpoint behavior over a deterministic slot transport.
 
-Adapted to the CT3 protocol: the Controller generates a C+7hex controller_id
-and announces its presence via the ANNOUNCE message type on startup (consuming
-seq=1), so test commands start at seq=2 when using initial_seq=0.
+Adapted to the CT3 protocol: the Controller generates a C+7hex controller_id.
+Announce is done by the MCP server on startup (not in __init__), so test
+commands start at seq=1 when using initial_seq=0.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
-import shutil
-import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 
 from cliptunnel_mcp import Controller
-from cliptunnel_mcp.controller import FileSeqStore
 from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
-    CONTROLLER_ADDR,
     Message,
     MsgType,
     pack,
@@ -28,7 +22,6 @@ from cliptunnel_mcp.protocol import (
 )
 from tests.clipboard_slot import ClipboardSlot
 
-SEQ_FILE_NAME = ".cliptunnel_controller_seq"
 TEST_REMOTE_ID = "R1a2b3c4"
 TEST_CONTROLLER_ID = "C1a2b3c4"
 
@@ -42,19 +35,6 @@ def is_message(value: str, kind: MsgType, seq: int) -> bool:
     return message is not None and message.mtype == kind.value and message.seq == seq
 
 
-class RecordingStore:
-    """Injectable seq store recording save calls."""
-
-    def __init__(self, initial: int = 0) -> None:
-        self.initial = initial
-        self.saves: list[int] = []
-
-    def load(self) -> int:
-        return self.initial
-
-    def save(self, seq: int) -> None:
-        self.saves.append(seq)
-
 
 class ControllerTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -67,21 +47,12 @@ class ControllerTestCase(unittest.TestCase):
             "retries": 3,
             "poll_interval": 0.001,
             "initial_seq": 0,
-            "persist_seq": False,
             "controller_id": TEST_CONTROLLER_ID,
         }
         params.update(overrides)
         controller = Controller(self.slot, **params)
         self.addCleanup(controller.close)
         return controller
-
-    def chdir_tmp(self) -> str:
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        previous = os.getcwd()
-        os.chdir(tmp)
-        self.addCleanup(os.chdir, previous)
-        return tmp
 
 
 class TestControllerConstruction(ControllerTestCase):
@@ -106,84 +77,7 @@ class TestControllerConstruction(ControllerTestCase):
         controller.send_command("work")
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 6))
 
-    def test_initial_seq_disables_default_file_store(self):
-        tmp = self.chdir_tmp()
-        controller = Controller(
-            self.slot,
-            timeout=1.0,
-            ack_timeout=0.02,
-            retries=1,
-            poll_interval=0.001,
-            initial_seq=0,
-            controller_id=TEST_CONTROLLER_ID,
-        )
-        self.addCleanup(controller.close)
-        controller.send_command("work")
-        self.assertFalse((Path(tmp) / SEQ_FILE_NAME).exists())
 
-    def test_default_store_persists_seq_file(self):
-        tmp = self.chdir_tmp()
-        controller = Controller(
-            self.slot,
-            timeout=1.0,
-            ack_timeout=0.02,
-            retries=1,
-            poll_interval=0.001,
-            controller_id=TEST_CONTROLLER_ID,
-        )
-        self.addCleanup(controller.close)
-        controller.send_command("work")
-        path = Path(tmp) / SEQ_FILE_NAME
-        self.assertTrue(path.exists())
-        # seq=1 (announce) + seq=2 (command) = 2
-        self.assertEqual(json.loads(path.read_text("utf-8"))["seq"], 2)
-
-    def test_persist_seq_false_writes_no_file(self):
-        tmp = self.chdir_tmp()
-        controller = Controller(
-            self.slot,
-            timeout=1.0,
-            ack_timeout=0.02,
-            retries=1,
-            poll_interval=0.001,
-            persist_seq=False,
-            controller_id=TEST_CONTROLLER_ID,
-        )
-        self.addCleanup(controller.close)
-        controller.send_command("work")
-        self.assertFalse((Path(tmp) / SEQ_FILE_NAME).exists())
-
-    def test_injected_store_loads_initial_and_saves_each_send(self):
-        store = RecordingStore(initial=3)
-        controller = self.make_controller(initial_seq=None, seq_store=store)
-        # seq=4 is the announce; seq=5,6 are user commands
-        controller.send_command("one")
-        controller.send_command("two")
-        self.assertEqual(store.saves, [4, 5, 6])
-
-
-class TestFileSeqStore(unittest.TestCase):
-    def test_save_then_load_round_trips(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            store = FileSeqStore(Path(tmp) / "seq.json")
-            store.save(41)
-            self.assertEqual(store.load(), 41)
-
-    def test_missing_file_loads_zero(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(FileSeqStore(Path(tmp) / "absent.json").load(), 0)
-
-    def test_corrupt_file_loads_zero(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "seq.json"
-            path.write_text('{"seq": "not-a-number"}', "utf-8")
-            self.assertEqual(FileSeqStore(path).load(), 0)
 
 
 class TestControllerSendCommand(ControllerTestCase):
@@ -196,9 +90,9 @@ class TestControllerSendCommand(ControllerTestCase):
     def test_command_written_as_ct3_wire(self):
         controller = self.make_controller()
         controller.send_command("echo 'a|b'", remote_id=TEST_REMOTE_ID)
-        # seq=1 is announce; seq=2 is our command
+        # No announce on init; seq=1 is our command
         _, value = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
         message = unpack(value)
         assert message is not None
@@ -209,39 +103,39 @@ class TestControllerSendCommand(ControllerTestCase):
     def test_exact_ack_releases_dispatcher_for_next_command(self):
         controller = self.make_controller()
         controller.send_command("one", remote_id=TEST_REMOTE_ID)
-        # seq=1 is announce; seq=2 is "one"
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 2))
-        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.ACK))
+        # No announce on init; seq=1 is "one"
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 1))
+        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ACK))
         controller.send_command("two", remote_id=TEST_REMOTE_ID)
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 3))
-        # seq=1 (announce) + seq=2 (one) + seq=3 (two) = 3
-        self.assertEqual(controller.seq, 3)
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 2))
+        # seq=1 (one) + seq=2 (two) = 2
+        self.assertEqual(controller.seq, 2)
 
     def test_future_resolves_with_response_payload_and_acks_back(self):
         controller = self.make_controller()
         future = controller.send_command("work", remote_id=TEST_REMOTE_ID)
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 2))
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 1))
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "result")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.RESPONSE, "result")
         )
         self.assertEqual(future.result(timeout=1.0), "result")
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 2))
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 1))
 
     def test_future_resolves_none_on_error(self):
         controller = self.make_controller()
         future = controller.send_command("work", remote_id=TEST_REMOTE_ID)
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 2))
-        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.ERROR, "boom"))
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 1))
+        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ERROR, "boom"))
         self.assertIsNone(future.result(timeout=1.0))
 
     def test_send_command_sync_returns_response(self):
         controller = self.make_controller()
 
         def deliver() -> None:
-            self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 2))
-            self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.ACK))
+            self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 1))
+            self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ACK))
             self.slot.overwrite(
-                wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "sync-result")
+                wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.RESPONSE, "sync-result")
             )
 
         writer = threading.Thread(target=deliver, daemon=True)
@@ -256,10 +150,10 @@ class TestControllerSendCommand(ControllerTestCase):
         command is sent to the broadcast address."""
         controller = self.make_controller()
         controller.send_command("work")
-        # seq=1 is announce (broadcast); seq=2 is our command — also broadcast
+        # No announce on init; seq=1 is our command — broadcast
         # since no remotes registered yet
         _, value = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
         message = unpack(value)
         assert message is not None
@@ -270,12 +164,12 @@ class TestControllerRetryOnAckTimeout(ControllerTestCase):
     def test_retransmits_command_on_ack_timeout(self):
         controller = self.make_controller(ack_timeout=0.02, retries=3)
         controller.send_command("work", remote_id=TEST_REMOTE_ID)
-        # seq=1 is announce; seq=2 is our command
+        # No announce on init; seq=1 is our command
         first, _ = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
         self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2), after=first
+            lambda value: is_message(value, MsgType.COMMAND, 1), after=first
         )
 
     def test_future_resolves_none_when_retries_exhausted(self):
@@ -288,23 +182,23 @@ class TestControllerDedupe(ControllerTestCase):
     def test_unrelated_response_does_not_release_pending_command(self):
         controller = self.make_controller(ack_timeout=0.02, retries=8)
         future = controller.send_command("current", remote_id=TEST_REMOTE_ID)
-        # seq=1 is announce; seq=2 is our command
+        # No announce on init; seq=1 is our command
         first, _ = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
         self.slot.overwrite(
             wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 99, MsgType.RESPONSE, "unrelated")
         )
         self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2), after=first
+            lambda value: is_message(value, MsgType.COMMAND, 1), after=first
         )
         self.assertFalse(future.done())
 
     def test_stale_response_from_earlier_session_is_ignored(self):
         controller = self.make_controller(initial_seq=5, ack_timeout=0.5, retries=3)
-        # seq=6 is announce; seq=7 is our command
+        # No announce on init; seq=6 is our command
         future = controller.send_command("fresh", remote_id=TEST_REMOTE_ID)
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 7))
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 6))
         self.slot.overwrite(
             wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 5, MsgType.RESPONSE, "stale")
         )
@@ -314,7 +208,7 @@ class TestControllerDedupe(ControllerTestCase):
             )
         self.assertFalse(future.done())
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 7, MsgType.RESPONSE, "fresh-result")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 6, MsgType.RESPONSE, "fresh-result")
         )
         self.assertEqual(future.result(timeout=1.0), "fresh-result")
 
@@ -418,36 +312,21 @@ class TestControllerClose(ControllerTestCase):
     def test_close_wakes_dispatcher_from_ack_wait(self):
         controller = self.make_controller(ack_timeout=5.0)
         controller.send_command("work", remote_id=TEST_REMOTE_ID)
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 2))
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 1))
         controller.close()
         self.assertFalse(controller._dispatcher_thread.is_alive())
         self.assertFalse(controller._reader_thread.is_alive())
 
-    def test_restart_continues_seq_from_persisted_store(self):
-        self.chdir_tmp()
-        first = Controller(
-            self.slot,
-            timeout=1.0,
-            ack_timeout=0.02,
-            retries=1,
-            poll_interval=0.001,
-            controller_id=TEST_CONTROLLER_ID,
-        )
+    def test_restart_continues_seq_from_initial_seq(self):
+        """A new Controller with initial_seq=N starts commands at seq=N+1."""
+        first = self.make_controller(initial_seq=0)
         first.send_command("one")
+        self.assertEqual(first.seq, 1)
         first.close()
-        second = Controller(
-            self.slot,
-            timeout=1.0,
-            ack_timeout=0.02,
-            retries=1,
-            poll_interval=0.001,
-            controller_id=TEST_CONTROLLER_ID,
-        )
-        self.addCleanup(second.close)
-        # first: seq=1 (announce) + seq=2 (one) = 2
-        # second: loads seq=2, announces seq=3, then "two" is seq=4
+        second = self.make_controller(initial_seq=first.seq)
+        # second: loads seq=1, then "two" is seq=2
         second.send_command("two")
-        self.assertEqual(second.seq, 4)
+        self.assertEqual(second.seq, 2)
 
 
 def wait_until(predicate, timeout: float = 2.0, interval: float = 0.005) -> bool:
@@ -481,7 +360,6 @@ class TestControllerUserClipboardRestore(ControllerTestCase):
             "retries": 3,
             "poll_interval": 0.001,
             "initial_seq": 0,
-            "persist_seq": False,
             "controller_id": TEST_CONTROLLER_ID,
         }
         params.update(overrides)
@@ -507,21 +385,21 @@ class TestControllerUserClipboardRestore(ControllerTestCase):
         """COMMAND → ACK → RESPONSE → ACK flow: no restore mid-exchange (not
         after the command ACK), exactly one restore after the final ACK-back."""
         controller, slot = self.make_restoring_controller()
-        controller.send_command("work")  # seq=2
-        slot.wait_for_write(lambda v: is_message(v, MsgType.COMMAND, 2))
+        controller.send_command("work")  # seq=1
+        slot.wait_for_write(lambda v: is_message(v, MsgType.COMMAND, 1))
 
         # Mid-exchange: the agent's immediate ACK for our command must not
         # trigger a restore — the exchange is still open.
-        slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.ACK))
+        slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ACK))
         time.sleep(0.1)
         self.assertEqual(slot.restore_calls, [])
 
         # Exchange completes: RESPONSE arrives, controller ACKs it back,
         # then restores exactly once.
         slot.overwrite(
-            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "done")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.RESPONSE, "done")
         )
-        slot.wait_for_write(lambda v: is_message(v, MsgType.ACK, 2))
+        slot.wait_for_write(lambda v: is_message(v, MsgType.ACK, 1))
         self.assertTrue(wait_until(lambda: len(slot.restore_calls) == 1, timeout=1.0))
         time.sleep(0.05)
         self.assertEqual(len(slot.restore_calls), 1)

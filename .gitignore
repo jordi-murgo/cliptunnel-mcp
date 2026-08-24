@@ -27,8 +27,6 @@ Thumbs.db
 # Local Pi runtime state
 .atl/
 
-# ClipTunnel runtime state
-.cliptunnel_controller_seq
 
 # Copilot agent OAuth token
 .copilot_agent_token

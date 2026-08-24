@@ -43,7 +43,6 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.transport import Transport
 
-_DEFAULT_SEQ_FILE = ".cliptunnel_controller_seq"
 
 logger = logging.getLogger("cliptunnel-controller")
 
@@ -107,16 +106,12 @@ def _detect_shell_version() -> str:
 
 
 def _detect_agent_auth() -> str:
-    """Check if a Copilot OAuth token is available (config file or legacy file)."""
+    """Check if a Copilot OAuth token is available (config file or env var)."""
     try:
         from cliptunnel_mcp.config import get_copilot_token
 
         if get_copilot_token():
             return "authenticated"
-        token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
-        if os.path.isfile(token_path):
-            with open(token_path, "r") as f:
-                return "authenticated" if f.read().strip() else "no_token"
         return "no_token"
     except Exception:
         return "unknown"
@@ -241,32 +236,6 @@ def _get_disk_free() -> int:
     except Exception:
         return 0
 
-class SeqStore(Protocol):
-    """Persistence for the Controller's last used command seq."""
-
-    def load(self) -> int: ...
-
-    def save(self, seq: int) -> None: ...
-
-
-class FileSeqStore:
-    """JSON-file-backed SeqStore; missing or corrupt files load as 0."""
-
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path)
-
-    def load(self) -> int:
-        try:
-            return int(json.loads(self._path.read_text("utf-8"))["seq"])
-        except (OSError, ValueError, TypeError, KeyError):
-            return 0
-
-    def save(self, seq: int) -> None:
-        try:
-            self._path.write_text(json.dumps({"seq": seq}), "utf-8")
-        except OSError:
-            pass
-
 
 def _slot_revision(transport: Transport) -> int:
     """Current slot revision; 0 when the transport has no monitor half."""
@@ -316,25 +285,11 @@ class Controller:
         poll_interval: float = 0.1,
         ack_timeout: float = 5.0,
         initial_seq: int | None = None,
-        persist_seq: bool = True,
-        seq_store: SeqStore | None = None,
     ) -> None:
         self._transport = transport
         self.controller_id = controller_id or generate_controller_id()
         self.name = name or self.controller_id
-        # Seq persistence: an injected store wins; otherwise a file-backed
-        # store under the working directory unless persistence is disabled
-        # (persist_seq=False or an explicit initial_seq).
-        store = seq_store
-        if store is None and persist_seq and initial_seq is None:
-            store = FileSeqStore(Path.cwd() / _DEFAULT_SEQ_FILE)
-        self._store = store
-        if initial_seq is not None:
-            self.seq = initial_seq
-        elif store is not None:
-            self.seq = store.load()
-        else:
-            self.seq = 0
+        self.seq = initial_seq if initial_seq is not None else 0
         # Ignore any R/E with seq <= this — stale slot content from a
         # previous Controller session.
         self._min_seq = self.seq
@@ -416,8 +371,6 @@ class Controller:
         """Broadcast an ANNOUNCE to discover remotes and other controllers."""
         self.seq += 1
         seq = self.seq
-        if self._store is not None:
-            self._store.save(seq)
         announce_payload = {
             "role": "controller",
             "name": self.name,
@@ -514,8 +467,6 @@ class Controller:
                         # Idle too long — send a ping
                         self.seq += 1
                         ping_seq = self.seq
-                        if self._store is not None:
-                            self._store.save(ping_seq)
                         wire = pack(Message(
                             frm=self.controller_id,
                             to=remote_id,
@@ -536,8 +487,6 @@ class Controller:
         """
         self.seq += 1
         seq = self.seq
-        if self._store is not None:
-            self._store.save(seq)
         future: concurrent.futures.Future = concurrent.futures.Future()
         with self._futures_lock:
             self._futures[seq] = future
@@ -713,7 +662,14 @@ class Controller:
                     else:
                         future.set_result(msg.payload)
                 # The exchange ended — hand the clipboard back to the user.
-                self._maybe_restore_user_clipboard()
+                # For broadcast registrations (no ACK sent), the clipboard
+                # holds the agent's message, not our self-write, so we need
+                # force_restore. For directed responses, our ACK is the last
+                # self-write, so the normal guard works.
+                if msg.to == BROADCAST_ADDR:
+                    self._force_restore_user_clipboard()
+                else:
+                    self._maybe_restore_user_clipboard()
 
     def _maybe_restore_user_clipboard(self) -> None:
         """Restore the user's clipboard after an exchange, if still intact.
@@ -737,6 +693,26 @@ class Controller:
             self._last_write_time = time.monotonic()
         if restored:
             logger.info("user clipboard restored after exchange")
+
+    def _force_restore_user_clipboard(self) -> None:
+        """Restore the user's clipboard without checking the self-write baseline.
+
+        Used for broadcast registrations where no ACK was sent, so the
+        clipboard still holds the agent's message.
+        """
+        restore = getattr(self._transport, "force_restore_user_clipboard", None)
+        if not callable(restore):
+            return
+        with self._slot_lock:
+            self._pace_write_gap()
+            try:
+                restored = restore()
+            except Exception:
+                logger.debug("user clipboard force-restore failed", exc_info=True)
+                return
+            self._last_write_time = time.monotonic()
+        if restored:
+            logger.info("user clipboard force-restored after broadcast registration")
 
     # ── Slot access ──────────────────────────────────────────────────
 
