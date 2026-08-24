@@ -232,6 +232,30 @@ class Agent:
             ), aes_key=self._aes_key)
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
+        # Registrations are fire-and-forget: no controller writes back to
+        # clean the clipboard.  Wait briefly for controllers to read the
+        # message, then restore the user's clipboard so it does not linger
+        # as visible CT3 noise.
+        restore = getattr(self._transport, "restore_user_clipboard", None)
+        if callable(restore):
+            threading.Thread(
+                target=self._delayed_restore,
+                args=(restore,),
+                daemon=True,
+                name="cliptunnel-restore",
+            ).start()
+
+    @staticmethod
+    def _delayed_restore(restore_fn) -> None:
+        """Wait for controllers to read the registration, then restore the
+        user's clipboard.  The 2-second delay gives controllers time to
+        poll and consume the message before we overwrite it."""
+        time.sleep(2.0)
+        try:
+            if restore_fn():
+                logger.debug("user clipboard restored after registration")
+        except Exception:
+            logger.debug("user clipboard restore after registration failed", exc_info=True)
 
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
