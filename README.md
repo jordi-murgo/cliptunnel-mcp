@@ -45,7 +45,7 @@ graph LR
     Controller -- "CT3 wire<br/>(clipboard)" --> Agent2
 ```
 
-On startup the Controller broadcasts an ANNOUNCE. Each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends back its sysinfo as a registration response. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — the HTTPS transport does not touch the user's clipboard).
+On startup each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends its sysinfo as a registration response to the broadcast address — no Controller announce needed. The Controller announces later when the MCP server starts (or when `discover()` is called), which triggers agents to re-register. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread pings remotes after 5 minutes of inactivity and marks them dead if no response is received within 30 seconds. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — the HTTPS transport does not touch the user's clipboard). The Agent also restores the user's clipboard after each registration, since registrations are fire-and-forget.
 
 ### Wire format
 
@@ -64,27 +64,39 @@ CT3|<from>|<to>|<seq>|<type>|<payload>
 
 ### Registration and announce flow
 
+The Agent registers on startup without waiting for a Controller announce, and re-registers whenever it receives an ANNOUNCE from any Controller. The Controller announces when the MCP server starts (or when `discover()` is called manually).
+
 ```mermaid
 sequenceDiagram
     participant C as Controller
     participant A1 as Agent A
     participant A2 as Agent B
 
-    C->>A1: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
-    C->>A2: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
-
+    Note over A1: startup — unsolicited registration
+    Note over A2: startup — unsolicited registration
     Note over A1: random delay 0.1–4.0s
     Note over A2: random delay 0.1–4.0s
 
-    A1-->>C: CT3|R1b2c3d4|C1a2b3c4|0|R|<sysinfo> (registration)
+    A1-->>C: CT3|R1b2c3d4|*|0|R|<sysinfo> (registration)
     C-->>A1: CT3|C1a2b3c4|R1b2c3d4|seq|A| (ACK)
-    A2-->>C: CT3|R5f6a7b8|C1a2b3c4|0|R|<sysinfo> (registration)
+    A2-->>C: CT3|R5f6a7b8|*|0|R|<sysinfo> (registration)
     C-->>A2: CT3|C1a2b3c4|R5f6a7b8|seq|A| (ACK)
 
     Note over C: registry updated:<br/>R1b2c3d4 → {sysinfo, alive}<br/>R5f6a7b8 → {sysinfo, alive}
+
+    Note over C: MCP server starts → discover()
+    C->>A1: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
+    C->>A2: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
+
+    Note over A1: ANNOUNCE received → re-register
+    Note over A2: ANNOUNCE received → re-register
+    A1-->>C: CT3|R1b2c3d4|*|0|R|<sysinfo> (re-registration)
+    C-->>A1: CT3|C1a2b3c4|R1b2c3d4|seq|A| (ACK)
+    A2-->>C: CT3|R5f6a7b8|*|0|R|<sysinfo> (re-registration)
+    C-->>A2: CT3|C1a2b3c4|R5f6a7b8|seq|A| (ACK)
 ```
 
-Because the clipboard is a single last-writer-wins slot, simultaneous announce responses can collide and one agent's registration may be lost. The heartbeat below makes this self-healing: the missing agent re-registers on the next cycle.
+The initial registration is directed to the broadcast address (`*`) so all controllers on the shared channel receive it. When a Controller's ANNOUNCE arrives later, the Agent re-registers to ensure visibility. Because the clipboard is a single last-writer-wins slot, simultaneous registrations can collide and one agent's registration may be lost. The heartbeat below makes this self-healing: the missing agent re-registers on the next cycle.
 
 ### Heartbeat
 
@@ -442,11 +454,10 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (513 tests with both pytest and unittest)
+# Run the test suite (512 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
-
 # Bare mode — no install, just PYTHONPATH
 PYTHONPATH=src:. python -m pytest -q
 ```
@@ -458,10 +469,10 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 - **One command at a time**: the Controller dispatches commands serially per target remote.
 - **Immediate ACK**: the Agent ACKs every command before processing.
 - **One response at a time**: the Agent holds one pending response; retransmits until the Controller's ACK.
-- **Announce discovery**: the Controller broadcasts an ANNOUNCE on startup and on `remote_discovery`; agents and other controllers reply. Replies can collide on the shared slot; the heartbeat makes this self-healing.
+- **Announce discovery**: the Controller broadcasts an ANNOUNCE when the MCP server starts (or on `remote_discovery`); agents re-register in response. Agents also register unsolicited on startup. Replies can collide on the shared slot; the heartbeat makes this self-healing.
 - **Heartbeat**: each Agent re-sends its registration every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) + jitter (0–15s); `<= 0` disables. The controller upserts the roster on every heartbeat.
 - **Keepalive**: Controller pings remotes after 5 min idle, marks dead if no response within 30s. With the heartbeat active, this only fires for agents that have stopped heartbeating.
-- **Clipboard preservation**: the clipboard transport backs up non-CT3 clipboard content; the Controller restores it (guarded) after the final ACK of every exchange.
+- **Clipboard preservation**: the clipboard transport backs up non-CT3 clipboard content; the Controller restores it (guarded) after the final ACK of every exchange; the Agent restores it after each registration (fire-and-forget, no controller response to clean the slot).
 - **Broadcast routing**: `to=*` messages are processed by all remotes with random backoff; no ACK.
 - **Targeted routing**: `to=<R+7hex>` messages are processed only by that remote; others ignore.
 - **Stale message guard**: the Controller skips R/E with `seq <= min_seq`.
