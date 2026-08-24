@@ -413,6 +413,96 @@ class TestRemoteInstallInstructions(ServerTestCase):
                       "CLIPTUNNEL_REPEATER_TOKEN", "CLIPTUNNEL_AES_KEY"):
                 os.environ.pop(k, None)
 
+    def test_firebase_variant(self):
+        """Firebase transport returns full config with URL + token."""
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "firebase"
+        os.environ["CLIPTUNNEL_FIREBASE_URL"] = "https://x-default-rtdb.firebaseio.com"
+        os.environ["CLIPTUNNEL_FIREBASE_TOKEN"] = "fb-secret"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "firebase")
+            self.assertEqual(data["firebase_url"], "https://x-default-rtdb.firebaseio.com")
+            self.assertEqual(data["firebase_token"], "fb-secret")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_TRANSPORT"], "firebase")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_FIREBASE_TOKEN"], "fb-secret")
+            self.assertNotIn("aes_key", data)
+            self.assertIn("CLIPTUNNEL_FIREBASE_TOKEN=fb-secret", data["agent_command"])
+        finally:
+            for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_FIREBASE_URL",
+                      "CLIPTUNNEL_FIREBASE_TOKEN"):
+                os.environ.pop(k, None)
+
+class TestRemoteInstallInstructionsWebSocket(ServerTestCase):
+    def test_websocket_variant(self):
+        """WebSocket transport returns full config with WS URL + token."""
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "websocket"
+        os.environ["CLIPTUNNEL_WS_URL"] = "ws://relay.example.com:9000"
+        os.environ["CLIPTUNNEL_WS_TOKEN"] = "def456secret"
+        old_aes = os.environ.pop("CLIPTUNNEL_AES_KEY", None)
+        old_config = os.environ.get("CLIPTUNNEL_CONFIG")
+        import tempfile as _tf
+        _empty = _tf.NamedTemporaryFile(mode="w", suffix=".toml", delete=False)
+        _empty.close()
+        os.environ["CLIPTUNNEL_CONFIG"] = _empty.name
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "websocket")
+            self.assertEqual(data["ws_url"], "ws://relay.example.com:9000")
+            self.assertEqual(data["agent_token"], "def456secret")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_TRANSPORT"], "websocket")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_WS_URL"], "ws://relay.example.com:9000")
+            self.assertEqual(data["env_vars"]["CLIPTUNNEL_WS_TOKEN"], "def456secret")
+            self.assertNotIn("CLIPTUNNEL_AES_KEY", data["env_vars"])
+            self.assertNotIn("aes_key", data)
+            self.assertIn("cliptunnel-agent", data["agent_command"])
+            self.assertIn("CLIPTUNNEL_WS_TOKEN=def456secret", data["agent_command"])
+        finally:
+            for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_WS_URL",
+                      "CLIPTUNNEL_WS_TOKEN"):
+                os.environ.pop(k, None)
+            if old_aes is not None:
+                os.environ["CLIPTUNNEL_AES_KEY"] = old_aes
+            if old_config is not None:
+                os.environ["CLIPTUNNEL_CONFIG"] = old_config
+            else:
+                os.environ.pop("CLIPTUNNEL_CONFIG", None)
+            import os as _os
+            try:
+                _os.unlink(_empty.name)
+            except OSError:
+                pass
+    def test_websocket_with_aes_key(self):
+        import base64
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "websocket"
+        os.environ["CLIPTUNNEL_WS_URL"] = "ws://relay.example.com:9000"
+        os.environ["CLIPTUNNEL_WS_TOKEN"] = "def456secret"
+        aes_b64 = base64.b64encode(b"0" * 32).decode()
+        os.environ["CLIPTUNNEL_AES_KEY"] = aes_b64
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["aes_key"], aes_b64)
+            self.assertIn("CLIPTUNNEL_AES_KEY", data["env_vars"])
+        finally:
+            for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_WS_URL",
+                      "CLIPTUNNEL_WS_TOKEN", "CLIPTUNNEL_AES_KEY"):
+                os.environ.pop(k, None)
+
+    def test_existing_https_branch_unchanged(self):
+        """HTTPS transport still works after adding WebSocket branch."""
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "https"
+        os.environ["CLIPTUNNEL_REPEATER_URL"] = "https://relay.example.com"
+        os.environ["CLIPTUNNEL_REPEATER_TOKEN"] = "secret123"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "https")
+        finally:
+            for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_REPEATER_URL",
+                      "CLIPTUNNEL_REPEATER_TOKEN"):
+                os.environ.pop(k, None)
 
 if __name__ == "__main__":
     unittest.main()

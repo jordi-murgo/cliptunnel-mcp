@@ -3,9 +3,10 @@
 Settings resolve with precedence: environment variable > config file
 (``~/.cliptunnel/config.toml``, see :mod:`cliptunnel_mcp.config`) >
 built-in default. ``CLIPTUNNEL_TRANSPORT`` selects ``clipboard``
-(default, case-insensitive) or ``https``.
+(default, case-insensitive), ``https``, or ``firebase``.
 ``clipboard`` → :class:`~cliptunnel_mcp.clipboard_transport.ClipboardTransport`.
 ``https`` → :class:`~cliptunnel_mcp.https_transport.HttpsTransport`.
+``firebase`` → :class:`~cliptunnel_mcp.firebase_transport.FirebaseTransport`.
 
 If ``CLIPTUNNEL_AES_KEY`` is set (base64 of 32 bytes), the selected transport
 is wrapped in :class:`~cliptunnel_mcp.encrypted_transport.EncryptedTransport`
@@ -21,8 +22,7 @@ from cliptunnel_mcp import config
 from cliptunnel_mcp.transport import Transport
 
 __all__ = ["build_transport"]
-
-_ACCEPTED = {"clipboard", "https"}
+_ACCEPTED = {"clipboard", "https", "firebase", "websocket"}
 
 
 def build_transport() -> Transport:
@@ -72,12 +72,69 @@ def build_transport() -> Transport:
             bearer_token=bearer_token,
         )
 
+    elif choice == "firebase":
+        from urllib.parse import urlparse
+
+        database_url = (config.get_env("CLIPTUNNEL_FIREBASE_URL") or "").strip()
+        auth_token = (config.get_env("CLIPTUNNEL_FIREBASE_TOKEN") or "").strip()
+
+        fb_missing: list[str] = []
+        if not database_url:
+            fb_missing.append("CLIPTUNNEL_FIREBASE_URL")
+        if not auth_token:
+            fb_missing.append("CLIPTUNNEL_FIREBASE_TOKEN")
+        if fb_missing:
+            raise ValueError(
+                "CLIPTUNNEL_TRANSPORT=firebase requires: " + ", ".join(fb_missing)
+            )
+
+        if urlparse(database_url).scheme.lower() != "https":
+            raise ValueError(
+                "CLIPTUNNEL_FIREBASE_URL must use the https scheme "
+                f"(got: {database_url!r})"
+            )
+
+        from cliptunnel_mcp.firebase_transport import FirebaseTransport
+
+        transport = FirebaseTransport(
+            database_url=database_url,
+            auth_token=auth_token,
+        )
+    elif choice == "websocket":
+        from urllib.parse import urlparse
+
+        ws_url = (config.get_env("CLIPTUNNEL_WS_URL") or "").strip()
+        ws_token = (config.get_env("CLIPTUNNEL_WS_TOKEN") or "").strip()
+
+        ws_missing: list[str] = []
+        if not ws_url:
+            ws_missing.append("CLIPTUNNEL_WS_URL")
+        if not ws_token:
+            ws_missing.append("CLIPTUNNEL_WS_TOKEN")
+        if ws_missing:
+            raise ValueError(
+                "CLIPTUNNEL_TRANSPORT=websocket requires: " + ", ".join(ws_missing)
+            )
+
+        scheme = urlparse(ws_url).scheme.lower()
+        if scheme not in ("ws", "wss"):
+            raise ValueError(
+                "CLIPTUNNEL_WS_URL must use the ws:// or wss:// scheme "
+                f"(got: {ws_url!r})"
+            )
+
+        from cliptunnel_mcp.ws_transport import WebSocketTransport
+
+        transport = WebSocketTransport(
+            ws_url=ws_url,
+            bearer_token=ws_token,
+        )
+
     else:
         raise ValueError(
             f"CLIPTUNNEL_TRANSPORT='{choice}' is not supported. "
             f"Accepted values: {', '.join(sorted(_ACCEPTED))}"
         )
-
     # --- Optional AES encryption layer (works with any transport) ---
     aes_env = config.get_env("CLIPTUNNEL_AES_KEY")
     if aes_env:

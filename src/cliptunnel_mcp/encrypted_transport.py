@@ -41,6 +41,11 @@ class EncryptedTransport:
         inner_name = getattr(self._inner, "backend_name", "unknown")
         return f"encrypted:{inner_name}"
 
+    @property
+    def endpoint(self) -> str | None:
+        """Sanitized transport endpoint from the inner transport."""
+        return getattr(self._inner, "endpoint", None)
+
     def read(self) -> str:
         """Read and decrypt the current value from the inner transport."""
         raw = self._inner.read()

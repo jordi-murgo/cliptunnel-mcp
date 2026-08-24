@@ -15,7 +15,7 @@
 # (chmod 600). The loader logs a warning if group/world-readable.
 
 # ---------------------------------------------------------------------------
-# Transport — "clipboard" (default) or "https".
+# Transport — "clipboard" (default), "https", or "firebase".
 #
 # CLIPBOARD: Controller and Agent must share the same OS clipboard
 #   (same machine, or a VDI session with clipboard redirection).
@@ -23,6 +23,11 @@
 #
 # HTTPS: Controller and Agent are outbound clients of your repeater.
 #   Deploy one first — see deploy/README.md.
+#
+# FIREBASE: hosted slot on a Firebase Realtime Database (free tier,
+#   no server to deploy). Set instead of the repeater values:
+#   firebase_url = "https://NAME-default-rtdb.firebaseio.com"  # https only
+#   firebase_token = "firebase-auth-token"
 # ---------------------------------------------------------------------------
 [transport]
 type = "https"

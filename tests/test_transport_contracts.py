@@ -417,5 +417,81 @@ class UserClipboardContracts(unittest.TestCase):
         self.assertFalse(transport.restore_user_clipboard())
 
 
+# ---------------------------------------------------------------------------
+# WebSocket transport contract tests (T10)
+# ---------------------------------------------------------------------------
+
+
+def make_ws_transport(initial: str = "") -> "WebSocketTransport":
+    """Build a WebSocketTransport backed by a FakeWsRepeater."""
+    from cliptunnel_mcp.ws_transport import WebSocketTransport
+    from tests.fake_ws_repeater import FakeWsRepeater
+
+    fake = FakeWsRepeater(tokens=["t"])
+    if initial:
+        fake._slot_value = initial
+    return WebSocketTransport(
+        ws_url="ws://test",
+        bearer_token="t",
+        ws_client=fake,
+        reconnect_delay=0.05,
+        request_timeout=2.0,
+    )
+
+
+class WebSocketTransportContracts(unittest.TestCase):
+    """WebSocketTransport satisfies the same Transport protocol contracts
+    as ClipboardSlot and HttpsTransport."""
+
+    def setUp(self) -> None:
+        self.transport = make_ws_transport()
+        self.addCleanup(self.transport.close)
+
+    def test_starts_empty_at_revision_zero(self):
+        self.assertEqual(self.transport.read(), "")
+        self.assertEqual(self.transport.revision, 0)
+
+    def test_write_replaces_value_and_bumps_revision(self):
+        command = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work")
+        self.transport.write(command)
+        self.assertEqual(self.transport.revision, 1)
+        self.assertTrue(is_message(self.transport.read(), MsgType.COMMAND, 1))
+
+    def test_overwrite_loses_previous_value_last_writer_wins(self):
+        first = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work")
+        second = wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ACK)
+        self.transport.write(first)
+        self.transport.write(second)
+        self.assertEqual(self.transport.read(), second)
+        self.assertNotEqual(self.transport.read(), first)
+
+    def test_wait_for_change_returns_once_revision_advances(self):
+        command = wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND, "work")
+        writer = threading.Thread(
+            target=lambda: self.transport.write(command), daemon=True
+        )
+        writer.start()
+        revision = self.transport.wait_for_change(after=0, timeout=2.0)
+        self.assertGreaterEqual(revision, 1)
+        writer.join(timeout=1.0)
+
+    def test_wait_for_change_timeout_returns_current_revision(self):
+        self.transport.write(
+            wire(TEST_CONTROLLER_ID, TEST_REMOTE_ID, 1, MsgType.COMMAND)
+        )
+        current = self.transport.revision
+        self.assertEqual(
+            self.transport.wait_for_change(after=current, timeout=0.05), current
+        )
+
+    def test_transport_satisfies_transport_protocol(self):
+        self.assertIsInstance(self.transport, Transport)
+
+    def test_transport_satisfies_revision_monitor_protocol(self):
+        from cliptunnel_mcp.transport import RevisionMonitor
+        self.assertIsInstance(self.transport, RevisionMonitor)
+
+    def test_backend_name_is_websocket(self):
+        self.assertEqual(self.transport.backend_name, "websocket")
 if __name__ == "__main__":
     unittest.main()
