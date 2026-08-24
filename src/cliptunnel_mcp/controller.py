@@ -407,8 +407,8 @@ class Controller:
             "last_seen": time.time(),
             "status": "alive",
         }
-        # Announce our presence to discover existing remotes and other controllers
-        self._send_announce()
+        # No announce here — the MCP server announces after identifying
+        # the client. For programmatic use, call discover() manually.
 
     # ── Public API ───────────────────────────────────────────────────
 

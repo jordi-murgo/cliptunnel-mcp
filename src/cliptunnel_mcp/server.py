@@ -108,7 +108,6 @@ def _capture_client_info(ctx) -> None:
                     "status": "alive",
                 })
                 controller._controllers[controller.controller_id] = existing
-            logger.info("client identified: %s (protocol %s)", display, protocol_version)
             # Re-announce so other controllers see the updated mcp_* fields.
             controller._send_announce()
     except Exception:

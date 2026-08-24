@@ -86,8 +86,9 @@ class ControllerTestCase(unittest.TestCase):
 
 class TestControllerConstruction(ControllerTestCase):
     def test_announce_on_startup(self):
-        """The Controller broadcasts an ANNOUNCE on startup (seq=1)."""
-        self.make_controller()
+        """The Controller broadcasts an ANNOUNCE when discover() is called."""
+        controller = self.make_controller()
+        controller.discover()
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ANNOUNCE, 1)
         )
@@ -101,9 +102,9 @@ class TestControllerConstruction(ControllerTestCase):
 
     def test_initial_seq_seeds_command_sequence(self):
         controller = self.make_controller(initial_seq=5)
-        # seq=6 is the announce; seq=7 is the first user command
+        # No announce on startup; seq=6 is the first user command
         controller.send_command("work")
-        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 7))
+        self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 6))
 
     def test_initial_seq_disables_default_file_store(self):
         tmp = self.chdir_tmp()
