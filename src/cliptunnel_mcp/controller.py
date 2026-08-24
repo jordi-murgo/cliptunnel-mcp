@@ -41,9 +41,9 @@ from cliptunnel_mcp.protocol import (
     unpack,
     validate,
 )
+from cliptunnel_mcp import config
 from cliptunnel_mcp.transport import Transport
 
-_DEFAULT_SEQ_FILE = ".cliptunnel_controller_seq"
 
 logger = logging.getLogger("cliptunnel-controller")
 
@@ -107,16 +107,12 @@ def _detect_shell_version() -> str:
 
 
 def _detect_agent_auth() -> str:
-    """Check if a Copilot OAuth token is available (config file or legacy file)."""
+    """Check if a Copilot OAuth token is available (config file or env var)."""
     try:
         from cliptunnel_mcp.config import get_copilot_token
 
         if get_copilot_token():
             return "authenticated"
-        token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
-        if os.path.isfile(token_path):
-            with open(token_path, "r") as f:
-                return "authenticated" if f.read().strip() else "no_token"
         return "no_token"
     except Exception:
         return "unknown"
@@ -241,32 +237,6 @@ def _get_disk_free() -> int:
     except Exception:
         return 0
 
-class SeqStore(Protocol):
-    """Persistence for the Controller's last used command seq."""
-
-    def load(self) -> int: ...
-
-    def save(self, seq: int) -> None: ...
-
-
-class FileSeqStore:
-    """JSON-file-backed SeqStore; missing or corrupt files load as 0."""
-
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path)
-
-    def load(self) -> int:
-        try:
-            return int(json.loads(self._path.read_text("utf-8"))["seq"])
-        except (OSError, ValueError, TypeError, KeyError):
-            return 0
-
-    def save(self, seq: int) -> None:
-        try:
-            self._path.write_text(json.dumps({"seq": seq}), "utf-8")
-        except OSError:
-            pass
-
 
 def _slot_revision(transport: Transport) -> int:
     """Current slot revision; 0 when the transport has no monitor half."""
@@ -316,25 +286,18 @@ class Controller:
         poll_interval: float = 0.1,
         ack_timeout: float = 5.0,
         initial_seq: int | None = None,
-        persist_seq: bool = True,
-        seq_store: SeqStore | None = None,
     ) -> None:
+        # Protocol-level AES key (None = plaintext mode).
+        aes_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+        if aes_raw:
+            from cliptunnel_mcp import crypto
+            self._aes_key: bytes | None = crypto.parse_key(aes_raw)
+        else:
+            self._aes_key = None
         self._transport = transport
         self.controller_id = controller_id or generate_controller_id()
         self.name = name or self.controller_id
-        # Seq persistence: an injected store wins; otherwise a file-backed
-        # store under the working directory unless persistence is disabled
-        # (persist_seq=False or an explicit initial_seq).
-        store = seq_store
-        if store is None and persist_seq and initial_seq is None:
-            store = FileSeqStore(Path.cwd() / _DEFAULT_SEQ_FILE)
-        self._store = store
-        if initial_seq is not None:
-            self.seq = initial_seq
-        elif store is not None:
-            self.seq = store.load()
-        else:
-            self.seq = 0
+        self.seq = initial_seq if initial_seq is not None else 0
         # Ignore any R/E with seq <= this — stale slot content from a
         # previous Controller session.
         self._min_seq = self.seq
@@ -407,8 +370,8 @@ class Controller:
             "last_seen": time.time(),
             "status": "alive",
         }
-        # Announce our presence to discover existing remotes and other controllers
-        self._send_announce()
+        # No announce here — the MCP server announces after identifying
+        # the client. For programmatic use, call discover() manually.
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -416,8 +379,6 @@ class Controller:
         """Broadcast an ANNOUNCE to discover remotes and other controllers."""
         self.seq += 1
         seq = self.seq
-        if self._store is not None:
-            self._store.save(seq)
         announce_payload = {
             "role": "controller",
             "name": self.name,
@@ -434,7 +395,7 @@ class Controller:
             seq=seq,
             mtype=MsgType.ANNOUNCE.value,
             payload=json.dumps(announce_payload),
-        ))
+        ), aes_key=self._aes_key)
         with self._slot_lock:
             self._paced_write(wire)
 
@@ -475,15 +436,15 @@ class Controller:
         return {"controllers": controllers, "remotes": remotes}
 
     def _keepalive_loop(self) -> None:
-        """Background thread: ping idle remotes, mark dead ones.
+        """Background thread: mark remotes dead when heartbeat stops.
 
-        - Ping a remote only after 5 minutes (300s) of inactivity.
-        - If no response or ACK within 30s of the ping, mark as dead.
-        - The 10s loop interval is just the poll cycle; actual ping timing
-          is driven by last_seen, not the loop interval.
+        The agent heartbeat (every CLIPTUNNEL_HEARTBEAT_SECS, default 120s)
+        updates ``last_seen``. If a remote is idle beyond the dead threshold
+        (heartbeat interval * 3 + jitter margin), it is marked dead without
+        sending a ping. Channel-level keepalive (WS ping/pong, SSE) is
+        handled by each transport independently.
         """
-        _PING_IDLE = 300.0    # ping after 5 min idle
-        _DEAD_TIMEOUT = 30.0  # dead if no response 30s after ping
+        _DEAD_IDLE = 420.0     # 3.5x default heartbeat (120s + 60s margin)
         _LOOP_INTERVAL = 10.0
 
         while self._running:
@@ -493,40 +454,14 @@ class Controller:
             now = time.time()
             with self._registry_lock:
                 for remote_id, info in list(self._remotes.items()):
-                    last_seen = info.get("last_seen", 0)
-                    idle = now - last_seen
                     status = info.get("status", "alive")
-                    ping_sent_at = info.get("ping_sent_at")
-
                     if status == "dead":
                         continue
-
-                    if ping_sent_at is not None:
-                        # We sent a ping — check if it timed out
-                        if now - ping_sent_at > _DEAD_TIMEOUT:
-                            info["status"] = "dead"
-                            info["ping_sent_at"] = None
-                            logger.info("remote %s marked dead (no response to ping in %.0fs)", remote_id, _DEAD_TIMEOUT)
-                        # Still waiting for ping response — don't send another
-                        continue
-
-                    if idle > _PING_IDLE:
-                        # Idle too long — send a ping
-                        self.seq += 1
-                        ping_seq = self.seq
-                        if self._store is not None:
-                            self._store.save(ping_seq)
-                        wire = pack(Message(
-                            frm=self.controller_id,
-                            to=remote_id,
-                            seq=ping_seq,
-                            mtype=MsgType.PING.value,
-                            payload="",
-                        ))
-                        with self._slot_lock:
-                            self._paced_write(wire)
-                        info["ping_sent_at"] = now
-                        logger.info("ping sent to %s (idle %.0fs)", remote_id, idle)
+                    last_seen = info.get("last_seen", 0)
+                    idle = now - last_seen
+                    if idle > _DEAD_IDLE:
+                        info["status"] = "dead"
+                        logger.info("remote %s marked dead (no heartbeat for %.0fs)", remote_id, idle)
 
     def send_command(self, command: str, remote_id: str | None = None) -> concurrent.futures.Future:
         """Send *command* asynchronously — returns a Future immediately.
@@ -536,8 +471,6 @@ class Controller:
         """
         self.seq += 1
         seq = self.seq
-        if self._store is not None:
-            self._store.save(seq)
         future: concurrent.futures.Future = concurrent.futures.Future()
         with self._futures_lock:
             self._futures[seq] = future
@@ -588,7 +521,7 @@ class Controller:
                     seq=seq,
                     mtype=MsgType.COMMAND.value,
                     payload=command,
-                ))
+                ), aes_key=self._aes_key)
                 with self._slot_condition:
                     # Publish the exact pending seq atomically with the write
                     # so the reader can never observe the command first.
@@ -630,7 +563,7 @@ class Controller:
             last_raw = raw
             if not validate(raw, self.controller_id):
                 continue
-            msg = unpack(raw)
+            msg = unpack(raw, aes_key=self._aes_key)
             if msg is None:
                 continue
 
@@ -693,23 +626,30 @@ class Controller:
                                 }
                     except (json.JSONDecodeError, TypeError):
                         pass
-                # ACK the response back so the remote stops retransmitting.
-                self._paced_write(pack(Message(
-                    frm=self.controller_id,
-                    to=msg.frm,
-                    seq=msg.seq,
-                    mtype=MsgType.ACK.value,
-                    payload="",
-                )))
+                # Broadcast registrations (heartbeat) do not need an ACK —
+                # they are fire-and-forget. Directed responses get an ACK so
+                # the remote stops retransmitting.
+                if msg.to != BROADCAST_ADDR:
+                    # ACK the response back so the remote stops retransmitting.
+                    self._paced_write(pack(Message(
+                        frm=self.controller_id,
+                        to=msg.frm,
+                        seq=msg.seq,
+                        mtype=MsgType.ACK.value,
+                        payload="",
+                    ), aes_key=self._aes_key))
                 with self._futures_lock:
                     future = self._futures.pop(msg.seq, None)
                 if future is not None and not future.done():
                     if msg.mtype == MsgType.ERROR.value:
-                        future.set_result(None)
+                        # ERROR carries the agent's error payload (e.g. failed
+                        # command output).  Pass it through so callers can see
+                        # what went wrong; only a missing ACK (line 538) means
+                        # "no response from Agent".
+                        future.set_result(msg.payload)
                     else:
                         future.set_result(msg.payload)
-                # The ACK-back above ended the exchange — the slot is free,
-                # so hand the clipboard back to the user.
+                # The exchange ended — hand the clipboard back to the user.
                 self._maybe_restore_user_clipboard()
 
     def _maybe_restore_user_clipboard(self) -> None:
@@ -734,6 +674,7 @@ class Controller:
             self._last_write_time = time.monotonic()
         if restored:
             logger.info("user clipboard restored after exchange")
+
 
     # ── Slot access ──────────────────────────────────────────────────
 

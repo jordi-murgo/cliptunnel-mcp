@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 
-from cliptunnel_mcp import Agent
+from cliptunnel_mcp import Agent, config
 from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
     CONTROLLER_ADDR,
@@ -29,13 +29,18 @@ WORKER_PREFIX = "cliptunnel-agent-worker"
 
 TEST_CONTROLLER_ID = "C1a2b3c4"
 
+def _aes_key() -> bytes | None:
+    raw = config.get_env("CLIPTUNNEL_AES_KEY")
+    if raw:
+        from cliptunnel_mcp import crypto
+        return crypto.parse_key(raw)
+    return None
 
 def wire(frm: str, to: str, seq: int, kind: MsgType, payload: str = "") -> str:
-    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload))
-
+    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload), aes_key=_aes_key())
 
 def is_message(value: str, kind: MsgType, seq: int) -> bool:
-    message = unpack(value)
+    message = unpack(value, aes_key=_aes_key())
     return message is not None and message.mtype == kind.value and message.seq == seq
 
 
@@ -120,7 +125,7 @@ class TestAgentCommandHandling(AgentTestCase):
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 1)
         )
-        message = unpack(value)
+        message = unpack(value, aes_key=_aes_key())
         assert message is not None
         self.assertEqual(message.frm, agent.remote_id)
         self.assertEqual(message.to, TEST_CONTROLLER_ID)
@@ -132,7 +137,7 @@ class TestAgentCommandHandling(AgentTestCase):
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ERROR, 1)
         )
-        self.assertEqual(unpack(value).payload, "boom")
+        self.assertEqual(unpack(value, aes_key=_aes_key()).payload, "boom")
 
     def test_handler_exception_becomes_error_response(self):
         def handler(payload: str):
@@ -143,7 +148,7 @@ class TestAgentCommandHandling(AgentTestCase):
         _, value = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ERROR, 1)
         )
-        self.assertIn("kaboom", unpack(value).payload)
+        self.assertIn("kaboom", unpack(value, aes_key=_aes_key()).payload)
 
 
 class TestAgentWorkerPool(AgentTestCase):
@@ -168,7 +173,7 @@ class TestAgentWorkerPool(AgentTestCase):
             or is_message(value, MsgType.RESPONSE, 2),
             timeout=2.0,
         )
-        first_seq = unpack(first_value).seq
+        first_seq = unpack(first_value, aes_key=_aes_key()).seq
         second_seq = 2 if first_seq == 1 else 1
         self.slot.overwrite(
             wire(TEST_CONTROLLER_ID, agent.remote_id, first_seq, MsgType.ACK)
@@ -205,7 +210,9 @@ class TestAgentResponseCache(AgentTestCase):
         _, replayed = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 1), after=first
         )
-        self.assertEqual(replayed, value)
+        # Compare decrypted payloads, not raw wire strings (AES-GCM nonce is random)
+        self.assertEqual(unpack(replayed, aes_key=_aes_key()).payload,
+                         unpack(value, aes_key=_aes_key()).payload)
         self.assertEqual(calls, ["work"])
 
 
@@ -248,7 +255,7 @@ class TestAgentPing(AgentTestCase):
         _, ack = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ACK, 10)
         )
-        msg = unpack(ack)
+        msg = unpack(ack, aes_key=_aes_key())
         assert msg is not None
         self.assertEqual(msg.frm, agent.remote_id)
         self.assertEqual(msg.to, TEST_CONTROLLER_ID)
@@ -311,10 +318,10 @@ class TestAgentAnnounce(AgentTestCase):
         _, reg = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 0), timeout=5.0
         )
-        msg = unpack(reg)
+        msg = unpack(reg, aes_key=_aes_key())
         assert msg is not None
         self.assertEqual(msg.frm, agent.remote_id)
-        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
+        self.assertEqual(msg.to, BROADCAST_ADDR)
         # The payload should be sysinfo JSON with an "os" field.
         payload = json.loads(msg.payload)
         self.assertIn("os", payload)
@@ -350,7 +357,7 @@ class TestAgentAnnounce(AgentTestCase):
         _, reg = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 0), timeout=5.0
         )
-        msg = unpack(reg)
+        msg = unpack(reg, aes_key=_aes_key())
         assert msg is not None
         self.assertEqual(msg.frm, agent.remote_id)
         self.assertEqual(msg.to, TEST_CONTROLLER_ID)
@@ -395,16 +402,16 @@ class TestAgentHeartbeat(AgentTestCase):
     def test_heartbeat_sends_registrations_to_each_known_controller(self):
         agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
         agent._known_controllers.update({TEST_CONTROLLER_ID, "C0ff3e55"})
-        for cid in (TEST_CONTROLLER_ID, "C0ff3e55"):
-            _, value = self.slot.wait_for_write(
-                lambda v, c=cid: is_message(v, MsgType.RESPONSE, 0) and unpack(v).to == c,
-                timeout=5.0,
-            )
-            msg = unpack(value)
-            assert msg is not None
-            self.assertEqual(msg.frm, agent.remote_id)
-            payload = json.loads(msg.payload)
-            self.assertIn("os", payload)
+        # Heartbeat sends a single broadcast, not per-controller directed messages
+        _, value = self.slot.wait_for_write(
+            lambda v: is_message(v, MsgType.RESPONSE, 0) and unpack(v, aes_key=_aes_key()).to == BROADCAST_ADDR,
+            timeout=5.0,
+        )
+        msg = unpack(value, aes_key=_aes_key())
+        assert msg is not None
+        self.assertEqual(msg.frm, agent.remote_id)
+        payload = json.loads(msg.payload)
+        self.assertIn("os", payload)
 
     def test_heartbeat_repeats_registrations_periodically(self):
         agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
@@ -413,7 +420,7 @@ class TestAgentHeartbeat(AgentTestCase):
             return sum(
                 1
                 for w in self.slot._writes
-                if is_message(w, MsgType.RESPONSE, 0) and unpack(w).to == TEST_CONTROLLER_ID
+                if is_message(w, MsgType.RESPONSE, 0) and unpack(w, aes_key=_aes_key()).to == BROADCAST_ADDR
             )
 
         self.assertTrue(
@@ -457,7 +464,7 @@ class TestAgentHeartbeat(AgentTestCase):
             )
         self.slot.wait_for_write(
             lambda v: is_message(v, MsgType.RESPONSE, 0)
-            and unpack(v).to == TEST_CONTROLLER_ID,
+            and unpack(v, aes_key=_aes_key()).to == BROADCAST_ADDR,
             timeout=5.0,
         )
 

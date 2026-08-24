@@ -44,32 +44,27 @@ class CopilotClient:
     DEVICE_CLIENT_ID = "Iv1.b507a08c87ecfe98"
     DEVICE_SCOPE = "read:user"
 
-    def __init__(self, token_file: str = ".copilot_agent_token") -> None:
-        self._token_file = token_file
+    def __init__(self) -> None:
         self._copilot_token: CopilotToken | None = None
         self._ssl_ctx = ssl.create_default_context()
 
     def _read_oauth_token(self) -> str:
-        """Read the gho_ token: config file first, then legacy token file.
+        """Read the gho_ token from the config file or env var.
 
         ``[copilot].oauth_token`` in the TOML config file
-        (``~/.cliptunnel/config.toml``) takes precedence; when it is not set
-        the legacy ``.copilot_agent_token`` file is used as before.
+        (``~/.cliptunnel/config.toml``) or the ``CLIPTUNNEL_COPILOT_TOKEN``
+        env var are the supported sources.
         """
         from cliptunnel_mcp.config import get_copilot_token
 
-        config_token = get_copilot_token()
-        if config_token:
-            return config_token
-        try:
-            with open(self._token_file, "r") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                "No Copilot OAuth token found: set [copilot] oauth_token in "
-                "the config file or create the legacy file "
-                f"{self._token_file}"
-            )
+        token = get_copilot_token()
+        if token:
+            return token
+        raise FileNotFoundError(
+            "No Copilot OAuth token found: set [copilot] oauth_token in "
+            "the config file (~/.cliptunnel/config.toml) or use the "
+            "CLIPTUNNEL_COPILOT_TOKEN env var."
+        )
 
     def _exchange_token(self) -> CopilotToken:
         """Exchange the gho_ OAuth token for a Copilot session token."""

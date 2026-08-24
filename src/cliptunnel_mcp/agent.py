@@ -40,7 +40,7 @@ from cliptunnel_mcp.protocol import (
 )
 from cliptunnel_mcp.transport import Transport
 
-from cliptunnel_mcp import config
+from cliptunnel_mcp import __version__, config
 
 
 logger = logging.getLogger("cliptunnel-agent")
@@ -132,6 +132,13 @@ class Agent:
         response_ack_timeout: float = 1.0,
         heartbeat_secs: float | None = None,
     ) -> None:
+        # Protocol-level AES key (None = plaintext mode).
+        aes_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+        if aes_raw:
+            from cliptunnel_mcp import crypto
+            self._aes_key: bytes | None = crypto.parse_key(aes_raw)
+        else:
+            self._aes_key = None
         self.remote_id = generate_remote_id()
         self.tracker = SeqTracker()
         self.poll_interval = poll_interval
@@ -197,8 +204,10 @@ class Agent:
     def send_registration(self, controller_id: str | None = None) -> None:
         """Send a registration response with current sysinfo to a controller.
 
-        If *controller_id* is None, sends to all known controllers (or
-        falls back to the legacy ``CONTROLLER_ADDR`` if none are known).
+        If *controller_id* is None, sends a single broadcast registration
+        so all known controllers (and any new ones) receive it. This is
+        used by the heartbeat. If a specific controller_id is given, the
+        registration is directed to that controller only.
         """
         from cliptunnel_mcp.operations import dispatch
         req = {"op": "sysinfo"}
@@ -207,10 +216,12 @@ class Agent:
         if self._transport_endpoint:
             req["_transport_endpoint"] = self._transport_endpoint
         sysinfo_result, _ = dispatch(json.dumps(req))
-        targets = self._known_controllers if controller_id is None else {controller_id}
-        if not targets:
-            # Fallback: send to legacy C address (backward compat).
-            targets = {CONTROLLER_ADDR}
+        if controller_id is not None:
+            # Directed registration to a specific controller.
+            targets = [controller_id]
+        else:
+            # Heartbeat: single broadcast so all controllers see it.
+            targets = [BROADCAST_ADDR]
         for cid in targets:
             wire = pack(Message(
                 frm=self.remote_id,
@@ -218,9 +229,34 @@ class Agent:
                 seq=0,
                 mtype=MsgType.RESPONSE.value,
                 payload=sysinfo_result,
-            ))
+            ), aes_key=self._aes_key)
             self._write_slot_safe(wire)
             logger.info("registration sent to %s (remote_id=%s)", cid, self.remote_id)
+        # Registrations are fire-and-forget: no controller writes back to
+        # clean the clipboard.  Wait briefly for controllers to read the
+        # message, then restore the user's clipboard so it does not linger
+        # as visible CT3 noise.
+        restore = getattr(self._transport, "restore_user_clipboard", None)
+        if callable(restore):
+            threading.Thread(
+                target=self._delayed_restore,
+                args=(restore,),
+                daemon=True,
+                name="cliptunnel-restore",
+            ).start()
+
+    @staticmethod
+    def _delayed_restore(restore_fn) -> None:
+        """Wait for controllers to read the registration, then restore the
+        user's clipboard.  The 2-second delay gives controllers time to
+        poll and consume the message before we overwrite it."""
+        time.sleep(2.0)
+        try:
+            if restore_fn():
+                logger.debug("user clipboard restored after registration")
+        except Exception:
+            logger.debug("user clipboard restore after registration failed", exc_info=True)
+
 
     def _schedule_registration(self, delay: float | None = None, controller_id: str | None = None) -> None:
         """Schedule a registration response after a random delay."""
@@ -270,18 +306,18 @@ class Agent:
                 break
             if not self._running:
                 break
-            for cid in sorted(self._known_controllers):
+            if self._known_controllers:
                 if not self._running:
                     break
                 logger.debug(
-                    "heartbeat registration to %s (remote_id=%s)", cid, self.remote_id
+                    "heartbeat registration (remote_id=%s)", self.remote_id
                 )
                 try:
-                    self.send_registration(controller_id=cid)
+                    self.send_registration()
                 except Exception:
                     logger.warning(
-                        "heartbeat registration to %s failed — retrying next cycle",
-                        cid, exc_info=True,
+                        "heartbeat registration failed — retrying next cycle",
+                        exc_info=True,
                     )
 
 
@@ -298,7 +334,7 @@ class Agent:
             self._last_raw = raw
             return
 
-        msg = unpack(raw)
+        msg = unpack(raw, aes_key=self._aes_key)
         if msg is None:
             self._last_raw = raw
             return
@@ -315,7 +351,7 @@ class Agent:
                 logger.info("ANNOUNCE from controller %s — registering", msg.frm)
                 self._known_controllers.add(msg.frm)
                 self._last_raw = raw
-                self._schedule_registration(controller_id=msg.frm)
+                self._schedule_registration()
             else:
                 self._last_raw = raw
             return
@@ -329,7 +365,7 @@ class Agent:
                 seq=msg.seq,
                 mtype=MsgType.ACK.value,
                 payload="",
-            )))
+            ), aes_key=self._aes_key))
             self._last_raw = raw
             return
 
@@ -380,8 +416,8 @@ class Agent:
             seq=msg.seq,
             mtype=MsgType.ACK.value,
             payload="",
-        )))
-
+        ), aes_key=self._aes_key))
+        # The controller will read this ACK and then write its next message.
         # Dedupe: duplicates are ACKed above; done ones replay the cached
         # response, in-flight ones are already being processed.
         if not self.tracker.should_process(msg.seq):
@@ -435,7 +471,7 @@ class Agent:
                 seq=seq,
                 mtype=mtype,
                 payload=payload,
-            ))
+            ), aes_key=self._aes_key)
 
             with self._response_condition:
                 # Wait for any previous response to be acked; a new command
@@ -451,20 +487,25 @@ class Agent:
 
     # ── Slot access ──────────────────────────────────────────────────
 
-    def _write_slot_safe(self, wire: str) -> None:
+    def _write_slot_safe(self, wire: str, max_retries: int = 10) -> None:
         """Write to the slot and update _last_raw atomically.
 
-        Catches clipboard write failures so a transient clipboard lock
-        (Citrix, EDR) does not crash the responder thread.  The caller's
-        retransmission loop will retry on the next tick.
+        Catches clipboard write failures (Citrix contention, EDR locks) and
+        retries with exponential backoff up to *max_retries* times.
         """
-        try:
-            with self._slot_lock:
-                self._transport.write(wire)
-                self._last_raw = wire
-        except Exception:
-            logger.warning("clipboard write failed — will retry", exc_info=True)
-            time.sleep(0.5)
+        for attempt in range(max_retries):
+            try:
+                with self._slot_lock:
+                    self._transport.write(wire)
+                    self._last_raw = wire
+                return
+            except Exception:
+                if attempt + 1 >= max_retries:
+                    logger.error("clipboard write failed after %d retries — giving up", max_retries, exc_info=True)
+                    return
+                delay = min(0.1 * (2 ** attempt), 2.0)
+                logger.warning("clipboard write failed (attempt %d/%d) — retrying in %.1fs", attempt + 1, max_retries, delay)
+                time.sleep(delay)
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -513,7 +554,7 @@ def main() -> None:
     from cliptunnel_mcp.transport_factory import build_transport
     from cliptunnel_mcp.operations import dispatch as handler
     transport = build_transport()
-    logger.info("starting agent on %s transport", transport.backend_name)
+    logger.info("starting agent on %s transport (cliptunnel-mcp %s)", transport.backend_name, __version__)
     agent = Agent(transport, handler)
     logger.info("agent running — remote_id=%s — press Ctrl+C to stop", agent.remote_id)
 

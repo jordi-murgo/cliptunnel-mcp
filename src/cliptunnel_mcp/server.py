@@ -108,9 +108,7 @@ def _capture_client_info(ctx) -> None:
                     "status": "alive",
                 })
                 controller._controllers[controller.controller_id] = existing
-            logger.info("client identified: %s (protocol %s)", display, protocol_version)
-            # Re-announce so other controllers see the updated mcp_* fields.
-            controller._send_announce()
+            # No re-announce — the startup announce already reached everyone.
     except Exception:
         logger.debug("could not extract client info from context", exc_info=True)
 
@@ -203,6 +201,7 @@ def shell_auto(cmd: str, sync_timeout: float = 10.0, timeout: float = 60.0, remo
                 "future": future,
                 "cmd": cmd,
                 "started_at": started,
+                "timeout": timeout,
             }
         return {
             "job_id": job_id,
@@ -230,6 +229,22 @@ def shell_result(job_id: str) -> dict:
     future = job["future"]
     if not future.done():
         elapsed = time.monotonic() - job["started_at"]
+        # Detect zombie jobs: if the agent's subprocess timeout has passed
+        # plus a 30s grace period for clipboard round-trip, the response
+        # was likely lost.  Report timeout instead of running forever.
+        job_timeout = job.get("timeout", 60)
+        if elapsed > job_timeout + 30:
+            with _jobs_lock:
+                _jobs.pop(job_id, None)
+            return {
+                "status": "error",
+                "job_id": job_id,
+                "elapsed": round(elapsed, 1),
+                "stdout": None,
+                "stderr": None,
+                "returncode": None,
+                "error": f"command timed out after {job_timeout}s (response lost)",
+            }
         return {
             "status": "running",
             "job_id": job_id,
@@ -1018,6 +1033,14 @@ def main() -> None:
 
     set_controller(Controller(transport=transport))
     logger.info("Controller wired to %s transport", transport.backend_name)
+
+    # Announce on startup so agents discover the controller immediately.
+    # The mcp_client_name fields are added to the controller registry by
+    # _capture_client_info on the first tool call; a second announce is
+    # not needed because agents don't use those fields.
+    controller = _get_controller()
+    if controller is not None:
+        controller._send_announce()
 
     create_server().run(transport="stdio")
 

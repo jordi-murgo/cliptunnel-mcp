@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliptunnel-mcp"
-version = "0.9.0"
+version = "1.0.0"
 description = "Operate locked-down remote machines through their clipboard, an HTTPS repeater, or Firebase"
 authors = [
     { name = "Jordi Murgó", email = "jordi.murgo@gmail.com" },

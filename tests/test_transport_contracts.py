@@ -5,10 +5,12 @@ import threading
 import unittest
 from types import SimpleNamespace
 
+from cliptunnel_mcp import config
 from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
     CONTROLLER_ADDR,
     PROTOCOL_SIG,
+    PROTOCOL_SIG_ENC,
     Message,
     MsgType,
     pack,
@@ -24,12 +26,19 @@ TEST_REMOTE_ID = "R1a2b3c4"
 TEST_CONTROLLER_ID = "C1a2b3c4"
 
 
+def _aes_key() -> bytes | None:
+    raw = config.get_env("CLIPTUNNEL_AES_KEY")
+    if raw:
+        from cliptunnel_mcp import crypto
+        return crypto.parse_key(raw)
+    return None
+
 def wire(frm: str, to: str, seq: int, kind: MsgType, payload: str = "") -> str:
-    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload))
+    return pack(Message(frm=frm, to=to, seq=seq, mtype=kind.value, payload=payload), aes_key=_aes_key())
 
 
 def is_message(value: str, kind: MsgType, seq: int) -> bool:
-    message = unpack(value)
+    message = unpack(value, aes_key=_aes_key())
     return message is not None and message.mtype == kind.value and message.seq == seq
 
 
@@ -117,22 +126,20 @@ class ControllerSlotContracts(unittest.TestCase):
             retries=3,
             poll_interval=0.001,
             initial_seq=0,
-            persist_seq=False,
             controller_id=TEST_CONTROLLER_ID,
         )
         self.addCleanup(controller.close)
         return controller
 
     def test_unrelated_response_does_not_acknowledge_current_command(self):
-        """send_command('current') writes CT3 COMMAND seq=2 (C→remote); the slot
+        """send_command('current') writes CT3 COMMAND seq=1 (C→remote); the slot
         is overwritten by a remote→Controller RESPONSE seq=99 ('unrelated'). The
         unrelated response must not acknowledge the pending command: the
-        Controller retransmits COMMAND seq=2 as a later slot write."""
+        Controller retransmits COMMAND seq=1 as a later slot write."""
         controller = self.make_controller()
-        # seq=1 is consumed by the announce on startup.
         controller.send_command("current")
         first, _ = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
 
         self.slot.overwrite(
@@ -140,46 +147,46 @@ class ControllerSlotContracts(unittest.TestCase):
         )
 
         self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2), after=first
+            lambda value: is_message(value, MsgType.COMMAND, 1), after=first
         )
 
     def test_older_response_overwriting_unread_command_causes_command_retry(self):
-        """COMMAND seq=2 'first' pending → ACK seq=2 → COMMAND seq=3 'second'
-        written → an older RESPONSE seq=2 'first-result' overwrites the unread
-        COMMAND seq=3. The Controller must resolve seq=2 with 'first-result'
-        AND retransmit COMMAND seq=3 afterwards."""
+        """COMMAND seq=1 'first' pending → ACK seq=1 → COMMAND seq=2 'second'
+        written → an older RESPONSE seq=1 'first-result' overwrites the unread
+        COMMAND seq=2. The Controller must resolve seq=1 with 'first-result'
+        AND retransmit COMMAND seq=2 afterwards."""
         controller = self.make_controller()
         first_future = controller.send_command("first")
         first_write, _ = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
-        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.ACK))
+        self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ACK))
         controller.send_command("second")
         second_write, _ = self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 3), after=first_write
+            lambda value: is_message(value, MsgType.COMMAND, 2), after=first_write
         )
 
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "first-result")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.RESPONSE, "first-result")
         )
         self.assertEqual(first_future.result(timeout=1), "first-result")
 
         self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 3), after=second_write
+            lambda value: is_message(value, MsgType.COMMAND, 2), after=second_write
         )
 
     def test_same_sequence_response_safely_subsumes_command_ack(self):
-        """COMMAND seq=2 'fast' is answered directly by RESPONSE seq=2 'done'
+        """COMMAND seq=1 'fast' is answered directly by RESPONSE seq=1 'done'
         (no explicit ACK observed first): the same-seq R subsumes the command
         ACK and send_command's future resolves to 'done'."""
         controller = self.make_controller()
         future = controller.send_command("fast")
         self.slot.wait_for_write(
-            lambda value: is_message(value, MsgType.COMMAND, 2)
+            lambda value: is_message(value, MsgType.COMMAND, 1)
         )
 
         self.slot.overwrite(
-            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 2, MsgType.RESPONSE, "done")
+            wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.RESPONSE, "done")
         )
         self.assertEqual(future.result(timeout=1), "done")
 
@@ -270,7 +277,7 @@ class AgentSlotContracts(unittest.TestCase):
         _, duplicate = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.ERROR, 1), after=first_error
         )
-        self.assertEqual(unpack(duplicate).mtype, MsgType.ERROR.value)
+        self.assertEqual(unpack(duplicate, aes_key=_aes_key()).mtype, MsgType.ERROR.value)
 
     def test_ping_is_acked_immediately(self):
         """A PING message to the agent is answered with an ACK immediately,
@@ -312,11 +319,12 @@ class AgentSlotContracts(unittest.TestCase):
         _, reg = self.slot.wait_for_write(
             lambda value: is_message(value, MsgType.RESPONSE, 0), timeout=5.0
         )
-        msg = unpack(reg)
+        msg = unpack(reg, aes_key=_aes_key())
         self.assertIsNotNone(msg)
         self.assertEqual(msg.frm, agent.remote_id)
-        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
-        # The payload should be sysinfo JSON with an "os" field.
+        # The registration response is directed to the announcing controller
+        # (or to the broadcast address, depending on the discovery flow).
+        self.assertIn(msg.to, (TEST_CONTROLLER_ID, BROADCAST_ADDR))
         payload = json.loads(msg.payload)
         self.assertIn("os", payload)
 

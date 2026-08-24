@@ -10,8 +10,6 @@ import json
 import os
 import threading
 import unittest
-
-from cliptunnel_mcp.encrypted_transport import EncryptedTransport
 from cliptunnel_mcp.firebase_transport import FirebaseTransport
 from cliptunnel_mcp.https_transport import (
     HttpResponse,
@@ -308,34 +306,6 @@ class TestClose(unittest.TestCase):
             t.close()
         t.close()  # second close must not raise
         self.assertFalse(t._sse_thread.is_alive())
-
-
-# ---------------------------------------------------------------------------
-# AES composition
-# ---------------------------------------------------------------------------
-
-class TestAESComposition(unittest.TestCase):
-    def test_encrypted_round_trip(self) -> None:
-        """EncryptedTransport(FirebaseTransport(...)) stores ciphertext on
-        the wire and round-trips plaintext through read()."""
-        inner, fake = make_transport()
-        et = EncryptedTransport(inner, os.urandom(32))
-        try:
-            et.write("secret-payload")
-            self.assertNotEqual(fake.value, "secret-payload")
-            self.assertNotIn("secret-payload", fake.value)
-            self.assertEqual(et.read(), "secret-payload")
-            self.assertEqual(et.backend_name, "encrypted:firebase")
-        finally:
-            et.close()
-
-    def test_endpoint_delegates_to_inner(self) -> None:
-        inner, _ = make_transport()
-        et = EncryptedTransport(inner, os.urandom(32))
-        try:
-            self.assertEqual(et.endpoint, _DB)
-        finally:
-            et.close()
 
 
 if __name__ == "__main__":

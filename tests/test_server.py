@@ -130,7 +130,6 @@ class ServerTestCase(unittest.TestCase):
             retries=3,
             poll_interval=0.001,
             initial_seq=0,
-            persist_seq=False,
             controller_id="C1a2b3c4",
         )
         server.set_controller(self.controller)
@@ -250,15 +249,16 @@ class TestFsTools(ServerTestCase):
             with open(p) as f:
                 self.assertEqual(f.read(), "foo baz foo")
 
-    def test_agent_level_error_surfaces_as_no_response(self):
-        # ops errors travel as ERROR envelopes; the Controller resolves them
-        # to None and _send normalizes — the faithful vulcano behavior.
+    def test_agent_level_error_surfaces_payload(self):
+        # ops errors travel as ERROR envelopes; the Controller now passes
+        # the error payload through (previously it discarded it as None,
+        # which surfaced as a misleading "no response from Agent").
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "r.txt")
             with open(p, "w") as f:
                 f.write("nothing here")
             out = self.call("remote_fs_replace", path=p, old="xyz", new="abc")
-            self.assertEqual(out, "ERROR: no response from Agent")
+            self.assertIn("old text not found", out)
 
     def test_bin_read_write_roundtrip(self):
         import base64

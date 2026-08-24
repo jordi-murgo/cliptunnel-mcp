@@ -20,7 +20,7 @@ import time
 
 from clipboard_event import Clipboard
 
-from cliptunnel_mcp.protocol import PROTOCOL_SIG
+from cliptunnel_mcp.protocol import PROTOCOL_SIG, PROTOCOL_SIG_ENC
 
 
 class ClipboardTransport:
@@ -69,7 +69,7 @@ class ClipboardTransport:
     @staticmethod
     def _backup_candidate(text: str) -> str | None:
         """User-clipboard candidate: non-empty and not CT3 protocol traffic."""
-        if text and not text.startswith(PROTOCOL_SIG):
+        if text and not text.startswith(PROTOCOL_SIG) and not text.startswith(PROTOCOL_SIG_ENC):
             return text
         return None
 
@@ -118,6 +118,7 @@ class ClipboardTransport:
         except Exception:
             return False
         return True
+
 
     # ── RevisionMonitor interface ────────────────────────────────────
 

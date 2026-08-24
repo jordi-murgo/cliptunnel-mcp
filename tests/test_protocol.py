@@ -1,6 +1,7 @@
 """Unit tests for cliptunnel_mcp.protocol — stdlib unittest, zero deps."""
 from __future__ import annotations
 
+import base64
 import unittest
 
 import cliptunnel_mcp
@@ -8,6 +9,7 @@ from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
     CONTROLLER_ADDR,
     PROTOCOL_SIG,
+    PROTOCOL_SIG_ENC,
     PROTOCOL_VERSION,
     Message,
     MsgType,
@@ -16,6 +18,7 @@ from cliptunnel_mcp.protocol import (
     generate_remote_id,
     is_broadcast,
     is_controller,
+    is_encrypted,
     is_remote,
     is_valid_address,
     is_valid_from_address,
@@ -371,7 +374,6 @@ class TestUnpack(unittest.TestCase):
         self.assertEqual(m.payload, "")
 
     def test_unpack_unicode(self):
-        import base64
 
         payload = "cañón"
         encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
@@ -512,6 +514,142 @@ class TestRoundTrip(unittest.TestCase):
         self.assertIsNotNone(m2)
         self.assertEqual(m2.to, BROADCAST_ADDR)
         self.assertEqual(m2.payload, '{"op": "register"}')
+
+
+class TestEncryptedPack(unittest.TestCase):
+    def test_pack_encrypted_uses_ct3e_prefix(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")  # 32 bytes of '0'
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls")
+        result = pack(m, aes_key=key)
+        self.assertTrue(result.startswith("CT3E|C1a2b3c4|R1a2b3c4|1|C|"))
+        # The payload field is encrypted, not base64("ls")
+        self.assertNotIn("bHM=", result)
+
+    def test_pack_encrypted_header_is_plaintext(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=42, mtype="C", payload="secret")
+        result = pack(m, aes_key=key)
+        parts = result.split("|")
+        self.assertEqual(len(parts), 6)
+        self.assertEqual(parts[0], "CT3E")
+        self.assertEqual(parts[1], "C1a2b3c4")
+        self.assertEqual(parts[2], "R1a2b3c4")
+        self.assertEqual(parts[3], "42")
+        self.assertEqual(parts[4], "C")
+        # Payload is encrypted — not "secret" in plaintext
+        self.assertNotIn("secret", parts[5])
+
+    def test_pack_without_key_uses_ct3_prefix(self):
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls")
+        result = pack(m)
+        self.assertTrue(result.startswith("CT3|"))
+
+
+class TestEncryptedUnpack(unittest.TestCase):
+    def test_roundtrip_encrypted(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls -la")
+        raw = pack(m, aes_key=key)
+        m2 = unpack(raw, aes_key=key)
+        self.assertIsNotNone(m2)
+        self.assertEqual(m2.frm, "C1a2b3c4")
+        self.assertEqual(m2.to, "R1a2b3c4")
+        self.assertEqual(m2.seq, 1)
+        self.assertEqual(m2.mtype, "C")
+        self.assertEqual(m2.payload, "ls -la")
+
+    def test_roundtrip_encrypted_unicode(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=99, mtype="R", payload="café — 日本語")
+        raw = pack(m, aes_key=key)
+        m2 = unpack(raw, aes_key=key)
+        self.assertIsNotNone(m2)
+        self.assertEqual(m2.payload, "café — 日本語")
+
+    def test_roundtrip_encrypted_empty_payload(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="A", payload="")
+        raw = pack(m, aes_key=key)
+        m2 = unpack(raw, aes_key=key)
+        self.assertIsNotNone(m2)
+        self.assertEqual(m2.payload, "")
+
+    def test_unpack_ct3e_without_key_returns_raw_ciphertext(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="secret")
+        raw = pack(m, aes_key=key)
+        # Without key, should return the ciphertext as payload
+        m2 = unpack(raw)
+        self.assertIsNotNone(m2)
+        self.assertEqual(m2.frm, "C1a2b3c4")
+        # Payload is the raw base64 ciphertext, not "secret"
+        self.assertNotEqual(m2.payload, "secret")
+
+    def test_unpack_ct3e_with_wrong_key_returns_none(self):
+        key1 = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        key2 = base64.b64decode("rLk1TQ06bMQQM10BkqP/qEx7rHcJUp5SzkqXhaovGyA=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="secret")
+        raw = pack(m, aes_key=key1)
+        m2 = unpack(raw, aes_key=key2)
+        self.assertIsNone(m2)
+
+    def test_unpack_rejects_ct3e_bad_from(self):
+        raw = "CT3E|X|deadbeef|1|C|dGVzdA=="
+        self.assertIsNone(unpack(raw, aes_key=base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")))
+
+    def test_unpack_rejects_ct3e_bad_to(self):
+        raw = "CT3E|C1a2b3c4|Z|1|C|dGVzdA=="
+        self.assertIsNone(unpack(raw, aes_key=base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")))
+
+    def test_unpack_rejects_ct3e_non_integer_seq(self):
+        raw = "CT3E|C1a2b3c4|R1a2b3c4|abc|C|dGVzdA=="
+        self.assertIsNone(unpack(raw, aes_key=base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")))
+
+
+class TestIsEncrypted(unittest.TestCase):
+    def test_ct3e_is_encrypted(self):
+        self.assertTrue(is_encrypted("CT3E|C1a2b3c4|R1a2b3c4|1|C|dGVzdA=="))
+
+    def test_ct3_is_not_encrypted(self):
+        self.assertFalse(is_encrypted("CT3|C1a2b3c4|R1a2b3c4|1|C|dGVzdA=="))
+
+    def test_empty_is_not_encrypted(self):
+        self.assertFalse(is_encrypted(""))
+
+    def test_other_prefix_is_not_encrypted(self):
+        self.assertFalse(is_encrypted("CT3P|something"))
+
+
+class TestValidateEncrypted(unittest.TestCase):
+    def test_validate_accepts_ct3e_for_remote(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls")
+        raw = pack(m, aes_key=key)
+        self.assertTrue(validate(raw, TEST_REMOTE_ID))
+
+    def test_validate_accepts_ct3e_for_controller(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=1, mtype="R", payload="result")
+        raw = pack(m, aes_key=key)
+        self.assertTrue(validate(raw, TEST_CONTROLLER_ID))
+
+    def test_validate_rejects_ct3e_self_addressed(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_REMOTE_ID, seq=1, mtype="C", payload="ls")
+        raw = pack(m, aes_key=key)
+        self.assertFalse(validate(raw, TEST_REMOTE_ID))
+
+    def test_validate_rejects_ct3e_wrong_to(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_REMOTE_ID, to=TEST_CONTROLLER_ID, seq=1, mtype="R", payload="result")
+        raw = pack(m, aes_key=key)
+        self.assertFalse(validate(raw, TEST_REMOTE_ID))
+
+    def test_validate_accepts_ct3e_broadcast(self):
+        key = base64.b64decode("tqKJ7BPAT/tt0smOh+UPRub5/nvEi3pvj3IeAFt5KdU=")
+        m = Message(frm=TEST_CONTROLLER_ID, to=BROADCAST_ADDR, seq=1, mtype="N", payload="")
+        raw = pack(m, aes_key=key)
+        self.assertTrue(validate(raw, TEST_REMOTE_ID))
 
 
 class TestValidate(unittest.TestCase):

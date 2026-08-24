@@ -66,6 +66,23 @@ def dispatch(payload: str) -> tuple[str, bool]:
 
 # ── shell ────────────────────────────────────────────────────────────────────
 
+def _windows_shell() -> list[str] | None:
+    """Return the argv prefix for the best available Windows shell.
+
+    Prefers pwsh (PowerShell 7+), then powershell (Windows PowerShell 5.x),
+    then falls back to None — which means the caller should use shell=True
+    (cmd.exe /c) as before.
+    """
+    import platform
+    import shutil
+    if platform.system() != "Windows":
+        return None
+    for pwsh in ("pwsh", "powershell"):
+        if shutil.which(pwsh):
+            return [pwsh, "-NoProfile", "-NonInteractive", "-Command"]
+    return None
+
+
 def op_shell(req: dict) -> tuple[str, bool]:
     """Execute a shell command, return JSON with stdout, stderr, and returncode.
 
@@ -75,19 +92,34 @@ def op_shell(req: dict) -> tuple[str, bool]:
 
     The timeout defaults to 60 seconds but can be overridden by including
     a ``timeout`` field (in seconds) in the request.
+
+    On Windows, prefers PowerShell (pwsh/powershell) when available so that
+    cmdlets like Get-Date, Get-Location, etc. work.  Falls back to cmd.exe
+    via shell=True when no PowerShell is found.
     """
     cmd = req.get("cmd")
     if not cmd:
         return (json.dumps({"stdout": "", "stderr": "missing 'cmd' field", "returncode": -1}), True)
     timeout = req.get("timeout", 60)
+
+    pwsh_prefix = _windows_shell()
+
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        if pwsh_prefix is not None:
+            result = subprocess.run(
+                pwsh_prefix + [cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        else:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         return (json.dumps({"stdout": "", "stderr": f"Command timed out after {timeout}s", "returncode": -1}), True)
     except Exception as exc:
@@ -314,7 +346,18 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
     # ── User & environment ──────────────────────────────────────────
     info["user"] = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
     info["cwd"] = os.getcwd()
-    info["shell"] = os.environ.get("SHELL", "")
+    shell_val = os.environ.get("SHELL", "")
+    if not shell_val:
+        import platform as _pf
+        if _pf.system() == "Windows":
+            import shutil as _sh
+            for _pwsh in ("pwsh", "powershell"):
+                if _sh.which(_pwsh):
+                    shell_val = _pwsh
+                    break
+            else:
+                shell_val = "cmd"
+    info["shell"] = shell_val
     info["home"] = os.path.expanduser("~")
 
     # ── Agent auth ─────────────────────────────────────────────────
@@ -324,13 +367,7 @@ def op_sysinfo(req: dict) -> tuple[str, bool]:
         if get_copilot_token():
             info["agent_auth"] = "authenticated"
         else:
-            token_path = os.path.join(os.getcwd(), ".copilot_agent_token")
-            if os.path.isfile(token_path):
-                with open(token_path, "r") as _f:
-                    _tok = _f.read().strip()
-                info["agent_auth"] = "authenticated" if _tok else "no_token"
-            else:
-                info["agent_auth"] = "no_token"
+            info["agent_auth"] = "no_token"
     except Exception:
         info["agent_auth"] = "unknown"
 

@@ -1,14 +1,19 @@
 """
 ClipTunnel Protocol v3 — shared protocol module.
 
-Wire format: CT3|<from>|<to>|<seq>|<type>|<payload>
+Wire format (plaintext):  CT3|<from>|<to>|<seq>|<type>|<base64(payload)>
+Wire format (encrypted):  CT3E|<from>|<to>|<seq>|<type>|<base64(ciphertext)>
 
-  CT3      protocol signature + version
-  from     C+7-hex (Controller) or R+7-hex (Remote)
-  to       C+7-hex, R+7-hex, or * (broadcast)
-  seq      positive integer
-  type     C (command), R (response), E (error), A (ack), P (ping), N (announce)
-  payload  base64-encoded UTF-8
+  CT3/CT3E  protocol signature + version (E suffix = encrypted payload)
+  from      C+7-hex (Controller) or R+7-hex (Remote)
+  to        C+7-hex, R+7-hex, or * (broadcast)
+  seq       positive integer
+  type      C (command), R (response), E (error), A (ack), P (ping), N (announce)
+  payload   base64-encoded UTF-8 (plaintext) or base64(nonce||ciphertext+tag) (encrypted)
+
+The header (from, to, seq, type) is always plaintext so that repeater/relay
+transports can route by address without decrypting.  Only the payload field
+is encrypted when an AES key is configured.
 
 CT3 introduces prefixed addresses (C/R + 7 hex) to support multiple
 controllers on a shared clipboard.  Controllers announce their presence
@@ -26,6 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 PROTOCOL_SIG = "CT3"
+PROTOCOL_SIG_ENC = "CT3E"
 PROTOCOL_VERSION = 3
 
 # Broadcast address
@@ -121,18 +127,33 @@ def is_broadcast(addr: str) -> bool:
     return addr == BROADCAST_ADDR
 
 
-def pack(msg: Message) -> str:
-    """Serialize *msg* into the wire format ``CT3|from|to|seq|type|payload``.
+def pack(msg: Message, aes_key: bytes | None = None) -> str:
+    """Serialize *msg* into the wire format.
 
-    The payload is base64-encoded over UTF-8 bytes so that newlines, pipe
-    characters, and arbitrary unicode survive the clipboard round-trip.
+    When *aes_key* is None (default), the payload is base64-encoded over
+    UTF-8 bytes and the wire format is ``CT3|from|to|seq|type|base64(payload)``.
+
+    When *aes_key* is provided (32-byte AES-256 key), only the payload is
+    encrypted with AES-256-GCM and the wire format becomes
+    ``CT3E|from|to|seq|type|base64(ciphertext)``.  The header (from, to, seq,
+    type) remains plaintext so repeater/relay transports can route by address.
     """
+    if aes_key is not None:
+        from cliptunnel_mcp import crypto
+        encoded = crypto.encrypt(msg.payload, aes_key)
+        return f"{PROTOCOL_SIG_ENC}|{msg.frm}|{msg.to}|{msg.seq}|{msg.mtype}|{encoded}"
     encoded = base64.b64encode(msg.payload.encode("utf-8")).decode("ascii")
     return f"{PROTOCOL_SIG}|{msg.frm}|{msg.to}|{msg.seq}|{msg.mtype}|{encoded}"
 
 
-def unpack(raw: str) -> Message | None:
+def unpack(raw: str, aes_key: bytes | None = None) -> Message | None:
     """Parse a wire-format string back into a :class:`Message`.
+
+    Accepts both ``CT3|`` (plaintext) and ``CT3E|`` (encrypted payload)
+    signatures.  When the signature is ``CT3E|`` and *aes_key* is provided,
+    the payload is decrypted with AES-256-GCM.  When *aes_key* is None and
+    the signature is ``CT3E|``, the encrypted payload field is returned
+    as-is (the raw base64 ciphertext string).
 
     Returns ``None`` when the input is malformed, has the wrong number of
     fields, an unknown signature, an invalid address, a non-integer seq,
@@ -145,7 +166,7 @@ def unpack(raw: str) -> Message | None:
     if len(parts) != 6:
         return None
     sig, frm, to, seq_str, mtype, encoded = parts
-    if sig != PROTOCOL_SIG:
+    if sig not in (PROTOCOL_SIG, PROTOCOL_SIG_ENC):
         return None
     if not is_valid_from_address(frm):
         return None
@@ -157,23 +178,39 @@ def unpack(raw: str) -> Message | None:
         seq = int(seq_str)
     except ValueError:
         return None
-    try:
-        payload = base64.b64decode(encoded, validate=True).decode("utf-8")
-    except Exception:
-        return None
+    if sig == PROTOCOL_SIG_ENC:
+        if aes_key is not None:
+            from cliptunnel_mcp import crypto
+            try:
+                payload = crypto.decrypt(encoded, aes_key)
+            except Exception:
+                return None
+        else:
+            # No key — return the raw ciphertext field as the payload.
+            payload = encoded
+    else:
+        try:
+            payload = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except Exception:
+            return None
     return Message(frm=frm, to=to, seq=seq, mtype=mtype, payload=payload)
+
+
+def is_encrypted(raw: str) -> bool:
+    """Return True if *raw* starts with the ``CT3E|`` encrypted-payload prefix."""
+    return bool(raw) and raw.startswith(PROTOCOL_SIG_ENC + "|")
 
 
 def validate(raw: str, my_id: str) -> bool:
     """Return True if *raw* is a well-formed message addressed to *my_id*.
 
     *my_id* is a C+7hex or R+7hex endpoint ID. Rules:
-      - must start with ``CT3|``
+      - must start with ``CT3|`` or ``CT3E|``
       - ``to`` must equal *my_id* or ``'*'`` (broadcast)
       - ``from`` must NOT equal *my_id* (no self-addressed messages)
       - format must be valid (parseable by :func:`unpack`)
     """
-    if not raw or not raw.startswith(PROTOCOL_SIG + "|"):
+    if not raw or not (raw.startswith(PROTOCOL_SIG + "|") or raw.startswith(PROTOCOL_SIG_ENC + "|")):
         return False
     msg = unpack(raw)
     if msg is None:

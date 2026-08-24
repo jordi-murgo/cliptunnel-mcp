@@ -6,7 +6,7 @@ Operate locked-down remote machines through their clipboard, an HTTPS repeater, 
 
 `cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-**v0.9.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, four transport options — clipboard (default), HTTPS repeater, Firebase Realtime Database, and WebSocket repeater — optional AES-256-GCM encryption that works with any transport, and sanitized transport endpoint reporting in sysinfo.
+**v1.0.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, four transport options — clipboard (default), HTTPS repeater, Firebase Realtime Database, and WebSocket repeater — optional AES-256-GCM encryption that works with any transport, sanitized transport endpoint reporting in sysinfo, PowerShell shell execution on Windows, error responses that surface the agent's actual error output, and zombie job detection for commands whose clipboard response was lost.
 
 The package ships four layers:
 
@@ -130,8 +130,7 @@ The clipboard is the user's real pasteboard, so every protocol write would clobb
 
 - **Backup** — the transport observes every clipboard change. Any non-empty value that is not CT3 protocol traffic (`CT3|…`) is retained as the user-clipboard candidate. The backup is also seeded at construction from the initial value, so a startup announce never destroys pre-existing content.
 - **Guarded restore** — after the Controller sends the final ACK of an exchange, it calls `transport.restore_user_clipboard()`. The restore happens **only if the OS clipboard still holds this process's last self-write**; if another process or the user wrote anything in between, the restore is a silent no-op (it would otherwise clobber that content). On success the backup is written back as a self-write.
-
-This makes the heartbeat and the restore synergistic: a racy restore that clobbers an in-flight message is cured by the next heartbeat, and the user's clipboard survives the protocol traffic.
+This makes the heartbeat and the restore synergistic: a racy restore that clobbers an in-flight message is cured by the next heartbeat, and the user's clipboard survives the protocol traffic. The Agent also restores the user's clipboard after each registration heartbeat, since registrations are fire-and-forget — no controller writes back to clean the slot.
 
 ## Installation
 
@@ -276,8 +275,7 @@ The `dispatch` handler supports these operations:
 
 | Operation | Parameters | Returns |
 |-----------|------------|---------|
-| `shell` | `cmd` | JSON: `{stdout, stderr, returncode}` |
-| `fs.read` | `path` | JSON: `{content, lines}` |
+| `shell` | `cmd` | JSON: `{stdout, stderr, returncode}`. On Windows, prefers PowerShell (pwsh/powershell) and falls back to cmd.exe. |
 | `fs.write` | `path`, `content` | `wrote N bytes to PATH` |
 | `fs.list` | `path` | JSON: `[{name, size, is_dir}]` |
 | `fs.delete` | `path` | `deleted PATH` |
@@ -444,7 +442,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (509 tests with both pytest and unittest)
+# Run the test suite (513 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
