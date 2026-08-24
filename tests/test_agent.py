@@ -395,16 +395,16 @@ class TestAgentHeartbeat(AgentTestCase):
     def test_heartbeat_sends_registrations_to_each_known_controller(self):
         agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
         agent._known_controllers.update({TEST_CONTROLLER_ID, "C0ff3e55"})
-        for cid in (TEST_CONTROLLER_ID, "C0ff3e55"):
-            _, value = self.slot.wait_for_write(
-                lambda v, c=cid: is_message(v, MsgType.RESPONSE, 0) and unpack(v).to == c,
-                timeout=5.0,
-            )
-            msg = unpack(value)
-            assert msg is not None
-            self.assertEqual(msg.frm, agent.remote_id)
-            payload = json.loads(msg.payload)
-            self.assertIn("os", payload)
+        # Heartbeat sends a single broadcast, not per-controller directed messages
+        _, value = self.slot.wait_for_write(
+            lambda v: is_message(v, MsgType.RESPONSE, 0) and unpack(v).to == BROADCAST_ADDR,
+            timeout=5.0,
+        )
+        msg = unpack(value)
+        assert msg is not None
+        self.assertEqual(msg.frm, agent.remote_id)
+        payload = json.loads(msg.payload)
+        self.assertIn("os", payload)
 
     def test_heartbeat_repeats_registrations_periodically(self):
         agent = self.make_heartbeat_agent(heartbeat_secs=0.05)
@@ -413,7 +413,7 @@ class TestAgentHeartbeat(AgentTestCase):
             return sum(
                 1
                 for w in self.slot._writes
-                if is_message(w, MsgType.RESPONSE, 0) and unpack(w).to == TEST_CONTROLLER_ID
+                if is_message(w, MsgType.RESPONSE, 0) and unpack(w).to == BROADCAST_ADDR
             )
 
         self.assertTrue(
@@ -457,7 +457,7 @@ class TestAgentHeartbeat(AgentTestCase):
             )
         self.slot.wait_for_write(
             lambda v: is_message(v, MsgType.RESPONSE, 0)
-            and unpack(v).to == TEST_CONTROLLER_ID,
+            and unpack(v).to == BROADCAST_ADDR,
             timeout=5.0,
         )
 

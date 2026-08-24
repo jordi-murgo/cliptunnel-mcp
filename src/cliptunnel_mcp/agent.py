@@ -274,18 +274,18 @@ class Agent:
                 break
             if not self._running:
                 break
-            for cid in sorted(self._known_controllers):
+            if self._known_controllers:
                 if not self._running:
                     break
                 logger.debug(
-                    "heartbeat registration to %s (remote_id=%s)", cid, self.remote_id
+                    "heartbeat registration (remote_id=%s)", self.remote_id
                 )
                 try:
-                    self.send_registration(controller_id=cid)
+                    self.send_registration()
                 except Exception:
                     logger.warning(
-                        "heartbeat registration to %s failed — retrying next cycle",
-                        cid, exc_info=True,
+                        "heartbeat registration failed — retrying next cycle",
+                        exc_info=True,
                     )
 
 
