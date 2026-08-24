@@ -129,12 +129,14 @@ class TestControllerSendCommand(ControllerTestCase):
         self.assertEqual(future.result(timeout=1.0), "result")
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.ACK, 1))
 
-    def test_future_resolves_none_on_error(self):
+    def test_future_resolves_with_error_payload(self):
         controller = self.make_controller()
         future = controller.send_command("work", remote_id=TEST_REMOTE_ID)
         self.slot.wait_for_write(lambda value: is_message(value, MsgType.COMMAND, 1))
         self.slot.overwrite(wire(TEST_REMOTE_ID, TEST_CONTROLLER_ID, 1, MsgType.ERROR, "boom"))
-        self.assertIsNone(future.result(timeout=1.0))
+        # ERROR responses carry the agent's error payload — callers need to
+        # see what went wrong (e.g. failed command output), not a silent None.
+        self.assertEqual(future.result(timeout=1.0), "boom")
 
     def test_send_command_sync_returns_response(self):
         controller = self.make_controller()

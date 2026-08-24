@@ -642,7 +642,11 @@ class Controller:
                     future = self._futures.pop(msg.seq, None)
                 if future is not None and not future.done():
                     if msg.mtype == MsgType.ERROR.value:
-                        future.set_result(None)
+                        # ERROR carries the agent's error payload (e.g. failed
+                        # command output).  Pass it through so callers can see
+                        # what went wrong; only a missing ACK (line 538) means
+                        # "no response from Agent".
+                        future.set_result(msg.payload)
                     else:
                         future.set_result(msg.payload)
                 # The exchange ended — hand the clipboard back to the user.
