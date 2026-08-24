@@ -230,7 +230,7 @@ class Agent:
             # the slot within ~100ms; we restore after a short delay.
             self._schedule_clipboard_restore()
 
-    def _schedule_clipboard_restore(self, delay: float = 0.5) -> None:
+    def _schedule_clipboard_restore(self, delay: float = 2.0) -> None:
         """Schedule a deferred restore of the user's clipboard.
 
         Only applies to clipboard transports. Network transports are no-ops.
