@@ -201,6 +201,7 @@ def shell_auto(cmd: str, sync_timeout: float = 10.0, timeout: float = 60.0, remo
                 "future": future,
                 "cmd": cmd,
                 "started_at": started,
+                "timeout": timeout,
             }
         return {
             "job_id": job_id,
@@ -228,6 +229,22 @@ def shell_result(job_id: str) -> dict:
     future = job["future"]
     if not future.done():
         elapsed = time.monotonic() - job["started_at"]
+        # Detect zombie jobs: if the agent's subprocess timeout has passed
+        # plus a 30s grace period for clipboard round-trip, the response
+        # was likely lost.  Report timeout instead of running forever.
+        job_timeout = job.get("timeout", 60)
+        if elapsed > job_timeout + 30:
+            with _jobs_lock:
+                _jobs.pop(job_id, None)
+            return {
+                "status": "error",
+                "job_id": job_id,
+                "elapsed": round(elapsed, 1),
+                "stdout": None,
+                "stderr": None,
+                "returncode": None,
+                "error": f"command timed out after {job_timeout}s (response lost)",
+            }
         return {
             "status": "running",
             "job_id": job_id,
