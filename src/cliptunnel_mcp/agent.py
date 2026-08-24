@@ -319,7 +319,7 @@ class Agent:
                 logger.info("ANNOUNCE from controller %s — registering", msg.frm)
                 self._known_controllers.add(msg.frm)
                 self._last_raw = raw
-                self._schedule_registration(controller_id=msg.frm)
+                self._schedule_registration()
             else:
                 self._last_raw = raw
             return

@@ -314,7 +314,7 @@ class TestAgentAnnounce(AgentTestCase):
         msg = unpack(reg)
         assert msg is not None
         self.assertEqual(msg.frm, agent.remote_id)
-        self.assertEqual(msg.to, TEST_CONTROLLER_ID)
+        self.assertEqual(msg.to, BROADCAST_ADDR)
         # The payload should be sysinfo JSON with an "os" field.
         payload = json.loads(msg.payload)
         self.assertIn("os", payload)
