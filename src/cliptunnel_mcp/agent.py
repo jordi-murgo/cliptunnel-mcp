@@ -504,7 +504,7 @@ class Agent:
                     logger.error("clipboard write failed after %d retries — giving up", max_retries, exc_info=True)
                     return
                 delay = min(0.1 * (2 ** attempt), 2.0)
-                logger.warning("clipboard write failed (attempt %d/%d) — retrying in %.1fs", attempt + 1, max_retries, delay, exc_info=True)
+                logger.warning("clipboard write failed (attempt %d/%d) — retrying in %.1fs", attempt + 1, max_retries, delay)
                 time.sleep(delay)
 
 # ── Entry point ──────────────────────────────────────────────────────────────
