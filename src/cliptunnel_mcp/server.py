@@ -108,8 +108,7 @@ def _capture_client_info(ctx) -> None:
                     "status": "alive",
                 })
                 controller._controllers[controller.controller_id] = existing
-            # Re-announce so other controllers see the updated mcp_* fields.
-            controller._send_announce()
+            # No re-announce — the startup announce already reached everyone.
     except Exception:
         logger.debug("could not extract client info from context", exc_info=True)
 
@@ -1017,6 +1016,14 @@ def main() -> None:
 
     set_controller(Controller(transport=transport))
     logger.info("Controller wired to %s transport", transport.backend_name)
+
+    # Announce on startup so agents discover the controller immediately.
+    # The mcp_client_name fields are added to the controller registry by
+    # _capture_client_info on the first tool call; a second announce is
+    # not needed because agents don't use those fields.
+    controller = _get_controller()
+    if controller is not None:
+        controller._send_announce()
 
     create_server().run(transport="stdio")
 
