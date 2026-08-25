@@ -54,10 +54,10 @@ def build_transport() -> Transport:
     try:
         factory = registry.get_transport_factory(choice)
     except KeyError:
-        accepted = ", ".join(sorted(registry.transport_names()))
+        available = ", ".join(sorted(registry.transport_names()))
         raise ValueError(
             f"CLIPTUNNEL_TRANSPORT='{choice}' is not supported. "
-            f"Accepted values: {accepted}"
+            f"Available transports: {available}"
         ) from None
 
     config_dict = {

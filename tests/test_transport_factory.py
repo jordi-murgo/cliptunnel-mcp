@@ -201,7 +201,9 @@ class TestUnknown(unittest.TestCase):
             env.set("CLIPTUNNEL_TRANSPORT", "carrier-pigeon")
             with self.assertRaises(ValueError) as ctx:
                 build_transport()
-            self.assertIn("not supported", str(ctx.exception))
+            msg = str(ctx.exception)
+            self.assertIn("not supported", msg)
+            self.assertIn("Available transports:", msg)
         finally:
             env.restore()
 
@@ -500,6 +502,7 @@ class TestRegistryLookup(unittest.TestCase):
                 build_transport()
             msg = str(ctx.exception)
             self.assertIn("not supported", msg)
+            self.assertIn("Available transports:", msg)
             # Registry has clipboard, https, firebase, websocket
             for name in ("clipboard", "https", "firebase", "websocket"):
                 self.assertIn(name, msg)
