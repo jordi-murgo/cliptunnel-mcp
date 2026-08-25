@@ -117,9 +117,74 @@ None. Only new files were created — no existing source files were touched.
 - `test_server.TestRemoteInstallInstructions.test_firebase_variant` — `CLIPTUNNEL_AES_KEY` env pollution
 - `test_server.TestRemoteInstallInstructions.test_https_variant` — `CLIPTUNNEL_AES_KEY` env pollution
 
-### Remaining Tasks
+## Batch 3: T8-T11 (final)
 
-- T8: Implement load_plugins() discovery in plugins.py
-- T9: Update __init__.py exports + pyproject.toml entry-point
-- T10: Create tests/fake_plugin.py + end-to-end test
-- T11: Update existing tests for error message format changes
+### Tasks Completed
+
+- **T8: load_plugins() — plugin discovery** — Implemented `load_plugins(reg)` in `plugins.py`:
+  - Discovers plugins via `importlib.metadata.entry_points(group="cliptunnel_mcp.plugins")`, sorted by entry-point name
+  - Discovers `.py` files from local plugin directory (default `~/.cliptunnel/plugins/`, overridable via `CLIPTUNNEL_PLUGINS_DIR`), sorted by filename
+  - Each plugin must expose a `register(registry)` function
+  - Per-plugin try/except with `logging.WARNING` + traceback, skip and continue
+  - Sets `_loaded` flag to prevent double-loading
+  - Helper functions: `_discover_entry_point_plugins()`, `_discover_local_dir_plugins()`, `_load_local_plugin()`
+  - Added `os` to top-level imports (stdlib only)
+  - 9 new tests: entry-point discovery, sorted loading, local-dir discovery, error handling (broken EP, broken local, missing register), double-load prevention
+
+- **T9: Package exports + pyproject.toml entry-point group** — Updated `__init__.py` and `pyproject.toml`:
+  - `__init__.py` exports `ExtensionRegistry`, `ToolSpec`, `registry`, `load_plugins`, `Transport`, `RevisionMonitor`
+  - `pyproject.toml` adds empty `[project.entry-points."cliptunnel_mcp.plugins"]` group (documents the interface; core ships no plugins)
+  - 6 new tests verifying all exported symbols are accessible from package level
+
+- **T10: End-to-end fake plugin test** — Created `tests/fake_plugin.py` and end-to-end tests:
+  - `fake_plugin.py` registers a custom transport ("fake" with FakeTransport), op ("fake.hello"), and tool ("fake_tool")
+  - 5 end-to-end tests: fake transport registered, factory produces Transport, op registered and callable, tool registered, tool handler callable
+
+- **T11: Update transport_factory error message** — Updated error message format and test assertions:
+  - Changed error message from "Accepted values: ..." to "Available transports: ..."
+  - Updated `TestUnknown.test_unknown_transport_raises` to assert "Available transports:" in message
+  - Updated `TestRegistryLookup.test_unknown_transport_lists_registry_names` to assert "Available transports:" in message
+  - All transport_factory tests pass (32 tests)
+
+### Files Created
+
+- `tests/fake_plugin.py` — Test-only plugin fixture registering fake transport, op, and tool
+
+### Files Modified
+
+- `src/cliptunnel_mcp/plugins.py` — added `load_plugins()` + discovery helpers, `os` import, `load_plugins` in `__all__`
+- `src/cliptunnel_mcp/__init__.py` — added plugin API exports (ExtensionRegistry, ToolSpec, registry, load_plugins, Transport, RevisionMonitor)
+- `src/cliptunnel_mcp/transport_factory.py` — error message format changed to "Available transports: ..."
+- `pyproject.toml` — added empty `[project.entry-points."cliptunnel_mcp.plugins"]` group
+- `tests/test_plugins.py` — 20 new tests (T8: 9, T9: 6, T10: 5)
+- `tests/test_transport_factory.py` — updated 2 assertions for new error message format
+
+### Test Results
+
+- `python -m unittest tests.test_plugins -v` → 70 tests, all pass
+- `python -m unittest tests.test_transport_factory -v` → 32 tests, all pass
+- `python -m unittest tests.test_operations -v` → 33 tests, all pass
+- `python -m unittest tests.test_config -v` → 27 tests, 2 pre-existing failures (config pollution), 5 T7 tests pass
+- Combined targeted suite: 153 tests, 2 pre-existing failures
+
+### Commits Made
+
+- `fb4f830` — `feat: add plugin discovery via entry points and local dir (T8)`
+- `a3ce68e` — `feat: export plugin API from package (T9)`
+- `bcabed7` — `test: add end-to-end fake plugin test (T10)`
+- `25cb2ed` — `test: update transport_factory error message assertions (T11)`
+
+## Final Status
+
+All 11 tasks (T1-T11) completed. The external plugin system is fully implemented:
+- ExtensionRegistry with 5 extension kinds (transports, ops, tools, config, install instructions)
+- register_builtins() registering all core extensions
+- All 5 core modules refactored to use registry (transport_factory, operations, server, config)
+- load_plugins() discovering plugins via entry points and local directory
+- Package-level API exports
+- End-to-end test plugin fixture
+- All existing tests updated for new error message format
+
+**Pre-existing failures** (2, environment config pollution, unchanged from Batch 2):
+- `test_config.TestGetEnv.test_default_when_neither` — `~/.cliptunnel/config.toml` pollution
+- `test_config.TestGetCopilotToken.test_no_token_when_section_missing` — `~/.cliptunnel/config.toml` has `copilot.oauth_token`
