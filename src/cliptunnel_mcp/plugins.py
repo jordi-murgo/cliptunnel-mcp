@@ -793,7 +793,7 @@ def _discover_local_dir_plugins(plugins_dir: str) -> list:
         return []
     files = []
     for fname in sorted(os.listdir(plugins_dir)):
-        if fname.endswith(".py") and not fname.startswith("_"):
+        if fname.endswith(".py") and not fname.startswith("."):
             files.append((fname, os.path.join(plugins_dir, fname)))
     return files
 
