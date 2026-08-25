@@ -31,6 +31,7 @@ import argparse
 import base64
 import concurrent.futures
 import asyncio
+import json
 import logging
 import os
 import shlex
@@ -886,118 +887,17 @@ def create_server():
         WARNING: Output contains bearer tokens and AES keys. Do not log
         or expose this output beyond the operator.
         """
+        _ensure_registry_loaded()
+        from cliptunnel_mcp.plugins import registry
+
         transport = config.get_env("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
 
-        if transport == "https":
-            repeater_url = config.get_env("CLIPTUNNEL_REPEATER_URL", "")
-            agent_token = config.get_env("CLIPTUNNEL_REPEATER_TOKEN", "")
-            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+        try:
+            emitter = registry.get_install_instructions(transport)
+        except KeyError:
+            emitter = registry.get_install_instructions("clipboard")
 
-            env_vars = {
-                "CLIPTUNNEL_TRANSPORT": "https",
-                "CLIPTUNNEL_REPEATER_URL": repeater_url,
-                "CLIPTUNNEL_REPEATER_TOKEN": agent_token,
-            }
-
-            prefix_parts = [
-                "CLIPTUNNEL_TRANSPORT=https",
-                f"CLIPTUNNEL_REPEATER_URL={shlex.quote(repeater_url)}",
-                f"CLIPTUNNEL_REPEATER_TOKEN={shlex.quote(agent_token)}",
-            ]
-            pip_command = "pip install cliptunnel-mcp"
-
-            result: dict = {
-                "transport": "https",
-                "repeater_url": repeater_url,
-                "agent_token": agent_token,
-                "env_vars": env_vars,
-                "pip_command": pip_command,
-            }
-
-            if aes_key_raw:
-                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
-                result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
-
-            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
-            result["agent_command"] = agent_command
-            return json.dumps(result)
-
-        if transport == "firebase":
-            firebase_url = config.get_env("CLIPTUNNEL_FIREBASE_URL", "")
-            firebase_token = config.get_env("CLIPTUNNEL_FIREBASE_TOKEN", "")
-            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
-
-            env_vars = {
-                "CLIPTUNNEL_TRANSPORT": "firebase",
-                "CLIPTUNNEL_FIREBASE_URL": firebase_url,
-                "CLIPTUNNEL_FIREBASE_TOKEN": firebase_token,
-            }
-
-            prefix_parts = [
-                "CLIPTUNNEL_TRANSPORT=firebase",
-                f"CLIPTUNNEL_FIREBASE_URL={shlex.quote(firebase_url)}",
-                f"CLIPTUNNEL_FIREBASE_TOKEN={shlex.quote(firebase_token)}",
-            ]
-            pip_command = "pip install cliptunnel-mcp"
-
-            result = {
-                "transport": "firebase",
-                "firebase_url": firebase_url,
-                "firebase_token": firebase_token,
-                "env_vars": env_vars,
-                "pip_command": pip_command,
-            }
-
-            if aes_key_raw:
-                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
-                result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
-
-            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
-            result["agent_command"] = agent_command
-        if transport == "websocket":
-            ws_url = config.get_env("CLIPTUNNEL_WS_URL", "")
-            agent_token = config.get_env("CLIPTUNNEL_WS_TOKEN", "")
-            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
-
-            env_vars = {
-                "CLIPTUNNEL_TRANSPORT": "websocket",
-                "CLIPTUNNEL_WS_URL": ws_url,
-                "CLIPTUNNEL_WS_TOKEN": agent_token,
-            }
-
-            prefix_parts = [
-                "CLIPTUNNEL_TRANSPORT=websocket",
-                f"CLIPTUNNEL_WS_URL={shlex.quote(ws_url)}",
-                f"CLIPTUNNEL_WS_TOKEN={shlex.quote(agent_token)}",
-            ]
-            pip_command = "pip install cliptunnel-mcp"
-
-            result: dict = {
-                "transport": "websocket",
-                "ws_url": ws_url,
-                "agent_token": agent_token,
-                "env_vars": env_vars,
-                "pip_command": pip_command,
-            }
-
-            if aes_key_raw:
-                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
-                result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
-
-            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
-            result["agent_command"] = agent_command
-            return json.dumps(result)
-        # clipboard (default)
-        result = {
-            "transport": "clipboard",
-            "env_vars": {},
-            "pip_command": "pip install cliptunnel-mcp",
-            "agent_command": "cliptunnel-agent",
-        }
-        return json.dumps(result)
+        return emitter({})
 
     # ── Register plugin tools from registry ──────────────────────────────
     _ensure_registry_loaded()

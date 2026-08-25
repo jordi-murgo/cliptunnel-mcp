@@ -490,6 +490,51 @@ class TestRemoteInstallInstructionsWebSocket(ServerTestCase):
                       "CLIPTUNNEL_WS_TOKEN", "CLIPTUNNEL_AES_KEY"):
                 os.environ.pop(k, None)
 
+class TestRegistryInstallInstructions(ServerTestCase):
+    """T6: remote_install_instructions uses registry.get_install_instructions."""
+
+    def test_registry_uses_registered_emitter_for_known_transport(self):
+        """Registering a custom emitter in registry makes remote_install_instructions call it."""
+        from cliptunnel_mcp.plugins import registry
+
+        def custom_emitter(cfg_dict):
+            return json.dumps({"transport": "custom", "custom_field": "yes"})
+
+        registry._install_instructions["custom-transport"] = custom_emitter
+        old = os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "custom-transport"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "custom")
+            self.assertEqual(data["custom_field"], "yes")
+        finally:
+            if old is not None:
+                os.environ["CLIPTUNNEL_TRANSPORT"] = old
+            else:
+                os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+            registry._install_instructions.pop("custom-transport", None)
+
+    def test_unknown_transport_falls_back_to_clipboard(self):
+        """Unknown transport falls back to clipboard emitter from registry."""
+        old = os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "totally-unknown-xyz"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "clipboard")
+        finally:
+            if old is not None:
+                os.environ["CLIPTUNNEL_TRANSPORT"] = old
+            else:
+                os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+
+    def test_all_four_builtin_transports_use_registry(self):
+        """All 4 builtin transports resolve via registry, not hardcoded if/elif."""
+        from cliptunnel_mcp.plugins import registry
+        for t in ("clipboard", "https", "firebase", "websocket"):
+            self.assertIsNotNone(registry._install_instructions.get(t))
+
     def test_existing_https_branch_unchanged(self):
         """HTTPS transport still works after adding WebSocket branch."""
         os.environ["CLIPTUNNEL_TRANSPORT"] = "https"
