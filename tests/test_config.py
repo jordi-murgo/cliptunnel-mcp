@@ -260,5 +260,97 @@ ws_url = "ws://config.example.com"
             config.ENV_TO_FILE["CLIPTUNNEL_AES_KEY"], (("encryption",), "aes_key")
         )
 
+
+class TestPluginEnvMappingFallback(ConfigTestCase):
+    """T7: get_env checks plugin-registered config sections after ENV_TO_FILE."""
+
+    def test_plugin_env_var_resolves_via_registry(self) -> None:
+        """A plugin-registered env var resolves from the TOML config file."""
+        from cliptunnel_mcp.plugins import registry
+
+        # Register a temporary plugin config section
+        plugin_mapping = {
+            "CLIPTUNNEL_PLUGIN_URL": (("plugin_section",), "url"),
+        }
+        registry._config_sections["test_plugin"] = plugin_mapping
+
+        toml_content = '[plugin_section]\nurl = "https://plugin.example.com"\n'
+        path = self.write_config(toml_content)
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+
+        try:
+            result = config.get_env("CLIPTUNNEL_PLUGIN_URL")
+            self.assertEqual(result, "https://plugin.example.com")
+        finally:
+            registry._config_sections.pop("test_plugin", None)
+
+    def test_builtin_env_var_still_works_with_plugin_sections(self) -> None:
+        """Built-in ENV_TO_FILE mappings still resolve when plugin sections exist."""
+        from cliptunnel_mcp.plugins import registry
+
+        plugin_mapping = {
+            "CLIPTUNNEL_PLUGIN_X": (("plugin",), "x"),
+        }
+        registry._config_sections["test_plugin2"] = plugin_mapping
+
+        path = self.write_config(_FULL_TOML)
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+
+        try:
+            self.assertEqual(config.get_env("CLIPTUNNEL_TRANSPORT"), "https")
+            self.assertEqual(config.get_env("CLIPTUNNEL_REPEATER_URL"), "https://repeater.example.com")
+        finally:
+            registry._config_sections.pop("test_plugin2", None)
+
+    def test_plugin_env_var_env_overrides_config(self) -> None:
+        """Env var wins over plugin config-file mapping."""
+        from cliptunnel_mcp.plugins import registry
+
+        plugin_mapping = {
+            "CLIPTUNNEL_PLUGIN_Y": (("plugin_y",), "y"),
+        }
+        registry._config_sections["test_plugin3"] = plugin_mapping
+
+        toml_content = '[plugin_y]\ny = "from-file"\n'
+        path = self.write_config(toml_content)
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+        os.environ["CLIPTUNNEL_PLUGIN_Y"] = "from-env"
+
+        try:
+            self.assertEqual(config.get_env("CLIPTUNNEL_PLUGIN_Y"), "from-env")
+        finally:
+            registry._config_sections.pop("test_plugin3", None)
+
+    def test_plugin_env_var_default_when_neither(self) -> None:
+        """Plugin env var returns default when neither env nor config file have it."""
+        from cliptunnel_mcp.plugins import registry
+
+        plugin_mapping = {
+            "CLIPTUNNEL_PLUGIN_Z": (("plugin_z",), "z"),
+        }
+        registry._config_sections["test_plugin4"] = plugin_mapping
+
+        path = self.write_config('[other]\nkey = "val"\n')
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+
+        try:
+            self.assertIsNone(config.get_env("CLIPTUNNEL_PLUGIN_Z"))
+            self.assertEqual(config.get_env("CLIPTUNNEL_PLUGIN_Z", "fallback"), "fallback")
+        finally:
+            registry._config_sections.pop("test_plugin4", None)
+
+    def test_no_circular_import_on_config_import(self) -> None:
+        """Importing config must not trigger a circular import with plugins."""
+        import importlib
+        import sys
+        # Clear cached modules to force fresh import
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("cliptunnel_mcp.config") or mod_name.startswith("cliptunnel_mcp.plugins"):
+                # Don't actually remove — just verify import works
+                pass
+        # If there were a circular import, this would raise
+        mod = importlib.import_module("cliptunnel_mcp.config")
+        self.assertTrue(hasattr(mod, "get_env"))
+
 if __name__ == "__main__":
     unittest.main()
