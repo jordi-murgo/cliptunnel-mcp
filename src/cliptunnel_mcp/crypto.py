@@ -1,8 +1,9 @@
-"""AES-256-GCM encryption layer for the HTTPS transport.
+"""AES-256-GCM encryption helpers for the CT3 protocol.
 
-When ``CLIPTUNNEL_AES_KEY`` is set, :class:`HttpsTransport` uses these helpers
-to encrypt the full CT3 wire string before writing it to the repeater and to
-decrypt it after reading.  The repeater never sees plaintext.
+When ``CLIPTUNNEL_AES_KEY`` is set, :func:`~cliptunnel_mcp.protocol.pack`
+encrypts the payload with AES-256-GCM and produces a ``CT3E|`` wire string
+(plaintext header + encrypted payload). :func:`~cliptunnel_mcp.protocol.unpack`
+decrypts on the receiving end. The transport never sees plaintext.
 
 Wire format::
 

@@ -3,10 +3,11 @@
 Settings resolve with precedence: environment variable > config file
 (``~/.cliptunnel/config.toml``, see :mod:`cliptunnel_mcp.config`) >
 built-in default. ``CLIPTUNNEL_TRANSPORT`` selects ``clipboard``
-(default, case-insensitive), ``https``, or ``firebase``.
+(default, case-insensitive), ``https``, ``firebase``, or ``websocket``.
 ``clipboard`` → :class:`~cliptunnel_mcp.clipboard_transport.ClipboardTransport`.
 ``https`` → :class:`~cliptunnel_mcp.https_transport.HttpsTransport`.
 ``firebase`` → :class:`~cliptunnel_mcp.firebase_transport.FirebaseTransport`.
+``websocket`` → :class:`~cliptunnel_mcp.ws_transport.WebSocketTransport`.
 
 Encryption is handled at the protocol level (:func:`~cliptunnel_mcp.protocol.pack`
 and :func:`~cliptunnel_mcp.protocol.unpack`) when ``CLIPTUNNEL_AES_KEY`` is set,
