@@ -78,12 +78,9 @@ sequenceDiagram
     Note over A1: random delay 0.1–4.0s
     Note over A2: random delay 0.1–4.0s
 
-    A1-->>C: CT3|R1b2c3d4|*|0|R|<sysinfo> (registration)
-    C-->>A1: CT3|C1a2b3c4|R1b2c3d4|seq|A| (ACK)
-    A2-->>C: CT3|R5f6a7b8|*|0|R|<sysinfo> (registration)
-    C-->>A2: CT3|C1a2b3c4|R5f6a7b8|seq|A| (ACK)
-
-    Note over C: registry updated:<br/>R1b2c3d4 → {sysinfo, alive}<br/>R5f6a7b8 → {sysinfo, alive}
+    A1-->>C: CT3|R1b2c3d4|*|0|R|<sysinfo> (registration, broadcast)
+    A2-->>C: CT3|R5f6a7b8|*|0|R|<sysinfo> (registration, broadcast)
+    Note over C: registry updated (no ACK — broadcast is fire-and-forget):<br/>R1b2c3d4 → {sysinfo, alive}<br/>R5f6a7b8 → {sysinfo, alive}
 
     Note over C: MCP server starts → discover()
     C->>A1: CT3|C1a2b3c4|*|seq|N| (announce broadcast)
@@ -91,10 +88,9 @@ sequenceDiagram
 
     Note over A1: ANNOUNCE received → re-register
     Note over A2: ANNOUNCE received → re-register
-    A1-->>C: CT3|R1b2c3d4|*|0|R|<sysinfo> (re-registration)
-    C-->>A1: CT3|C1a2b3c4|R1b2c3d4|seq|A| (ACK)
-    A2-->>C: CT3|R5f6a7b8|*|0|R|<sysinfo> (re-registration)
-    C-->>A2: CT3|C1a2b3c4|R5f6a7b8|seq|A| (ACK)
+    A1-->>C: CT3|R1b2c3d4|*|0|R|<sysinfo> (re-registration, broadcast)
+    A2-->>C: CT3|R5f6a7b8|*|0|R|<sysinfo> (re-registration, broadcast)
+    Note over C: registry upsert, last_seen refreshed (no ACK)
 ```
 
 The initial registration is directed to the broadcast address (`*`) so all controllers on the shared channel receive it. When a Controller's ANNOUNCE arrives later, the Agent re-registers to ensure visibility. Because the clipboard is a single last-writer-wins slot, simultaneous registrations can collide and one agent's registration may be lost. The heartbeat below makes this self-healing: the missing agent re-registers on the next cycle.
