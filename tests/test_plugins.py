@@ -321,5 +321,340 @@ class TestBuiltinOpCount(unittest.TestCase):
         self.assertEqual(set(reg.op_names()), expected_ops)
 
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# T8: load_plugins() — entry-point + local-dir discovery
+# ════════════════════════════════════════════════════════════════════════════
+
+import os
+import tempfile
+from unittest import mock
+
+from cliptunnel_mcp.plugins import load_plugins
+
+
+class TestLoadPluginsEntryPointDiscovery(unittest.TestCase):
+    """load_plugins discovers plugins via importlib.metadata entry points."""
+
+    def setUp(self):
+        from cliptunnel_mcp import plugins
+        self._old_loaded = plugins._loaded
+        plugins._loaded = False
+        # Fresh registry without builtins
+        self._reg = ExtensionRegistry()
+
+    def tearDown(self):
+        from cliptunnel_mcp import plugins
+        plugins._loaded = self._old_loaded
+
+    def test_entry_point_plugin_registers_op(self):
+        """A fake entry-point plugin registers its op in the registry."""
+        fake_module = type("M", (), {})()
+        def fake_register(reg):
+            reg.register_op("ep.hello", lambda req: ("hi from ep", False))
+        fake_module.register = fake_register
+
+        fake_ep = mock.Mock()
+        fake_ep.name = "ep-plugin"
+        fake_ep.load.return_value = fake_module
+
+        with mock.patch("importlib.metadata.entry_points", return_value={"cliptunnel_mcp.plugins": [fake_ep]}):
+            load_plugins(self._reg)
+
+        self.assertIn("ep.hello", self._reg.op_names())
+        result, error = self._reg.get_op_handler("ep.hello")({})
+        self.assertEqual(result, "hi from ep")
+        self.assertFalse(error)
+
+    def test_entry_points_loaded_sorted_by_name(self):
+        """Entry points are loaded in sorted order by entry-point name."""
+        call_order = []
+
+        def make_ep(name):
+            mod = type("M", (), {})()
+            def reg(r):
+                call_order.append(name)
+                r.register_op(f"{name}.op", lambda req: (name, False))
+            mod.register = reg
+            ep = mock.Mock()
+            ep.name = name
+            ep.load.return_value = mod
+            return ep
+
+        eps = [make_ep("zeta"), make_ep("alpha"), make_ep("mid")]
+        with mock.patch("importlib.metadata.entry_points", return_value={"cliptunnel_mcp.plugins": eps}):
+            load_plugins(self._reg)
+
+        self.assertEqual(call_order, ["alpha", "mid", "zeta"])
+
+
+class TestLoadPluginsLocalDir(unittest.TestCase):
+    """load_plugins discovers .py files from the local plugin directory."""
+
+    def setUp(self):
+        from cliptunnel_mcp import plugins
+        self._old_loaded = plugins._loaded
+        plugins._loaded = False
+        self._reg = ExtensionRegistry()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def tearDown(self):
+        from cliptunnel_mcp import plugins
+        plugins._loaded = self._old_loaded
+
+    def test_local_dir_plugin_registers_op(self):
+        """A .py file in the plugins dir registers its op."""
+        plugin_code = (
+            "def register(reg):\n"
+            "    reg.register_op('local.hello', lambda req: ('hi from local', False))\n"
+        )
+        plugin_path = os.path.join(self._tmp.name, "my_plugin.py")
+        with open(plugin_path, "w") as f:
+            f.write(plugin_code)
+
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+
+        self.assertIn("local.hello", self._reg.op_names())
+        result, error = self._reg.get_op_handler("local.hello")({})
+        self.assertEqual(result, "hi from local")
+
+    def test_local_dir_plugins_sorted_by_filename(self):
+        """Local-dir plugins load in sorted order by filename."""
+        call_order = []
+        for name in ("zeta.py", "alpha.py", "mid.py"):
+            path = os.path.join(self._tmp.name, name)
+            with open(path, "w") as f:
+                f.write(
+                    f"def register(reg):\n"
+                    f"    reg.register_op('{name}.op', lambda req: ('{name}', False))\n"
+                )
+
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+
+        self.assertEqual(self._reg.op_names(), ["alpha.py.op", "mid.py.op", "zeta.py.op"])
+
+
+class TestLoadPluginsErrorHandling(unittest.TestCase):
+    """load_plugins gracefully skips plugins that fail to load."""
+
+    def setUp(self):
+        from cliptunnel_mcp import plugins
+        self._old_loaded = plugins._loaded
+        plugins._loaded = False
+        self._reg = ExtensionRegistry()
+
+    def tearDown(self):
+        from cliptunnel_mcp import plugins
+        plugins._loaded = self._old_loaded
+
+    def test_broken_entry_point_skipped(self):
+        """A broken entry point is skipped; other plugins still load."""
+        good_module = type("M", (), {})()
+        def good_register(reg):
+            reg.register_op("good.op", lambda req: ("good", False))
+        good_module.register = good_register
+
+        good_ep = mock.Mock()
+        good_ep.name = "good-plugin"
+        good_ep.load.return_value = good_module
+
+        bad_ep = mock.Mock()
+        bad_ep.name = "bad-plugin"
+        bad_ep.load.side_effect = ImportError("boom")
+
+        with mock.patch("importlib.metadata.entry_points", return_value={"cliptunnel_mcp.plugins": [bad_ep, good_ep]}):
+            load_plugins(self._reg)
+
+        self.assertIn("good.op", self._reg.op_names())
+
+    def test_broken_local_plugin_skipped(self):
+        """A broken .py file in the plugins dir is skipped."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp))
+
+        # Good plugin
+        with open(os.path.join(tmp, "good.py"), "w") as f:
+            f.write("def register(reg):\n    reg.register_op('good.local', lambda req: ('ok', False))\n")
+
+        # Bad plugin — syntax error
+        with open(os.path.join(tmp, "bad.py"), "w") as f:
+            f.write("def register(  # syntax error missing colon\n")
+
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": tmp}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+
+        self.assertIn("good.local", self._reg.op_names())
+
+    def test_plugin_without_register_skipped(self):
+        """A plugin module without a register() function is skipped."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp))
+
+        with open(os.path.join(tmp, "noreg.py"), "w") as f:
+            f.write("x = 42\n")
+
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": tmp}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+
+        # Should not crash, and should have no ops
+        self.assertEqual(self._reg.op_names(), [])
+
+
+class TestLoadPluginsDoubleLoadPrevention(unittest.TestCase):
+    """load_plugins sets _loaded flag and refuses to run twice."""
+
+    def setUp(self):
+        from cliptunnel_mcp import plugins
+        self._old_loaded = plugins._loaded
+        plugins._loaded = False
+        self._reg = ExtensionRegistry()
+
+    def tearDown(self):
+        from cliptunnel_mcp import plugins
+        plugins._loaded = self._old_loaded
+
+    def test_loaded_flag_set_after_load(self):
+        """After load_plugins runs, _loaded is True."""
+        from cliptunnel_mcp import plugins
+        with mock.patch("importlib.metadata.entry_points", return_value={}):
+            with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": "/nonexistent"}):
+                load_plugins(self._reg)
+        self.assertTrue(plugins._loaded)
+
+    def test_double_load_no_op(self):
+        """Calling load_plugins twice does not re-load."""
+        from cliptunnel_mcp import plugins
+        call_count = [0]
+
+        fake_module = type("M", (), {})()
+        def fake_register(reg):
+            call_count[0] += 1
+            reg.register_op("dbl.op", lambda req: ("dbl", False))
+        fake_module.register = fake_register
+
+        fake_ep = mock.Mock()
+        fake_ep.name = "dbl"
+        fake_ep.load.return_value = fake_module
+
+        with mock.patch("importlib.metadata.entry_points", return_value={"cliptunnel_mcp.plugins": [fake_ep]}):
+            load_plugins(self._reg)
+            load_plugins(self._reg)  # second call should be no-op
+
+        self.assertEqual(call_count[0], 1)
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# T9: Package-level exports from cliptunnel_mcp
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestPackageExports(unittest.TestCase):
+    """Plugin API symbols are exported from the top-level cliptunnel_mcp package."""
+
+    def test_extension_registry_exported(self):
+        import cliptunnel_mcp
+        from cliptunnel_mcp import ExtensionRegistry
+        self.assertTrue(issubclass(ExtensionRegistry, object))
+
+    def test_tool_spec_exported(self):
+        from cliptunnel_mcp import ToolSpec
+        self.assertTrue(hasattr(ToolSpec, "__dataclass_fields__"))
+
+    def test_registry_exported(self):
+        from cliptunnel_mcp import registry
+        self.assertIsInstance(registry, ExtensionRegistry)
+
+    def test_load_plugins_exported(self):
+        from cliptunnel_mcp import load_plugins
+        self.assertTrue(callable(load_plugins))
+
+    def test_transport_exported(self):
+        from cliptunnel_mcp import Transport
+        self.assertTrue(hasattr(Transport, "__mro__"))
+
+    def test_revision_monitor_exported(self):
+        from cliptunnel_mcp import RevisionMonitor
+        self.assertTrue(hasattr(RevisionMonitor, "__mro__"))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# T10: End-to-end fake plugin test
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestFakePluginEndToEnd(unittest.TestCase):
+    """Load fake_plugin from a temp dir and verify transport, op, and tool registration."""
+
+    def setUp(self):
+        from cliptunnel_mcp import plugins
+        self._old_loaded = plugins._loaded
+        plugins._loaded = False
+        self._reg = ExtensionRegistry()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+        # Copy fake_plugin.py into the temp dir
+        import shutil
+        src = os.path.join(os.path.dirname(__file__), "fake_plugin.py")
+        dst = os.path.join(self._tmp.name, "fake_plugin.py")
+        shutil.copy(src, dst)
+
+    def tearDown(self):
+        from cliptunnel_mcp import plugins
+        plugins._loaded = self._old_loaded
+
+    def test_fake_transport_registered(self):
+        """The fake plugin registers a 'fake' transport."""
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+        self.assertIn("fake", self._reg.transport_names())
+
+    def test_fake_transport_factory_produces_transport(self):
+        """The fake transport factory returns an object implementing Transport."""
+        from cliptunnel_mcp.transport import Transport
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+        factory = self._reg.get_transport_factory("fake")
+        transport = factory({})
+        self.assertIsInstance(transport, Transport)
+
+    def test_fake_op_registered_and_callable(self):
+        """The fake plugin registers 'fake.hello' op; dispatch returns expected result."""
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+        self.assertIn("fake.hello", self._reg.op_names())
+        result, error = self._reg.get_op_handler("fake.hello")({})
+        self.assertEqual(result, "hello from fake plugin")
+        self.assertFalse(error)
+
+    def test_fake_tool_registered(self):
+        """The fake plugin registers a 'fake_tool' tool with handler."""
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+        self.assertIn("fake_tool", self._reg.tool_names())
+        spec = dict(self._reg.tools())["fake_tool"]
+        self.assertEqual(spec.name, "fake_tool")
+        self.assertTrue(callable(spec.handler))
+
+    def test_fake_tool_handler_callable(self):
+        """The fake tool handler returns expected output."""
+        with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": self._tmp.name}):
+            with mock.patch("importlib.metadata.entry_points", return_value={}):
+                load_plugins(self._reg)
+        spec = dict(self._reg.tools())["fake_tool"]
+        result = spec.handler({})
+        self.assertEqual(result, "tool output from fake plugin")
 if __name__ == "__main__":
     unittest.main()

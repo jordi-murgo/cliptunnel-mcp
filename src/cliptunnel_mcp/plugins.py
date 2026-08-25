@@ -13,6 +13,7 @@ safely from any other module without risk of circular dependencies.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from dataclasses import dataclass
 from typing import Callable, Iterable
@@ -20,6 +21,7 @@ from typing import Callable, Iterable
 __all__ = [
     "ExtensionRegistry",
     "ToolSpec",
+    "load_plugins",
     "register_builtins",
     "registry",
 ]
@@ -755,3 +757,105 @@ def _make_special_tool_handler(name: str) -> Callable:
         return handler
     else:
         raise ValueError(f"unknown special tool: {name}")
+
+
+# ── Plugin discovery ───────────────────────────────────────────────────────
+
+
+def _discover_entry_point_plugins() -> list:
+    """Return entry points for the ``cliptunnel_mcp.plugins`` group, sorted by name.
+
+    Handles both the Python 3.10+ dict-style and older tuple-style
+    ``entry_points()`` return values.
+    """
+    import importlib.metadata as ilm
+
+    try:
+        eps = ilm.entry_points()
+    except TypeError:
+        # Python <3.9 positional group argument
+        return sorted(ilm.entry_points("cliptunnel_mcp.plugins"), key=lambda e: e.name)
+
+    if isinstance(eps, dict):
+        group = eps.get("cliptunnel_mcp.plugins", [])
+    else:
+        # SelectableGroups (3.8-3.9)
+        group = eps.select(group="cliptunnel_mcp.plugins") if hasattr(eps, "select") else []
+    return sorted(group, key=lambda e: e.name)
+
+
+def _discover_local_dir_plugins(plugins_dir: str) -> list:
+    """Return sorted (filename, full-path) pairs for .py files in *plugins_dir*.
+
+    Returns an empty list if the directory does not exist.
+    """
+    if not plugins_dir or not os.path.isdir(plugins_dir):
+        return []
+    files = []
+    for fname in sorted(os.listdir(plugins_dir)):
+        if fname.endswith(".py") and not fname.startswith("_"):
+            files.append((fname, os.path.join(plugins_dir, fname)))
+    return files
+
+
+def _load_local_plugin(path: str, name: str, reg: ExtensionRegistry) -> None:
+    """Import a .py file from *path* and call its ``register(reg)`` if present."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(f"cliptunnel_plugin_{name}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot create spec for {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    register_fn = getattr(mod, "register", None)
+    if register_fn is None:
+        return
+    register_fn(reg)
+
+
+def load_plugins(reg: ExtensionRegistry | None = None) -> None:
+    """Discover and load external plugins into *reg* (default: module singleton).
+
+    Loading order:
+      1. Entry points in group ``cliptunnel_mcp.plugins`` (sorted by name).
+      2. ``.py`` files from the local plugin directory (sorted by filename),
+         default ``~/.cliptunnel/plugins/``, overridable via
+         ``CLIPTUNNEL_PLUGINS_DIR``.
+
+    Errors per plugin are logged as warnings and the plugin is skipped.
+    Sets ``_loaded`` to ``True`` to prevent double-loading.
+    """
+    global _loaded
+    if _loaded:
+        return
+    if reg is None:
+        reg = registry
+
+    # ── Entry-point plugins ────────────────────────────────────────────────
+    for ep in _discover_entry_point_plugins():
+        try:
+            mod = ep.load()
+            register_fn = getattr(mod, "register", None)
+            if register_fn is not None:
+                register_fn(reg)
+        except Exception:
+            import logging
+            import traceback
+
+            logging.warning("plugin '%s' failed to load: %s", ep.name, traceback.format_exc())
+
+    # ── Local-dir plugins ──────────────────────────────────────────────────
+    plugins_dir = os.environ.get(
+        "CLIPTUNNEL_PLUGINS_DIR",
+        os.path.join(os.path.expanduser("~"), ".cliptunnel", "plugins"),
+    )
+    for fname, fpath in _discover_local_dir_plugins(plugins_dir):
+        try:
+            _load_local_plugin(fpath, fname[:-3], reg)
+        except Exception:
+            import logging
+            import traceback
+
+            logging.warning("local plugin '%s' failed to load: %s", fname, traceback.format_exc())
+
+    _loaded = True
