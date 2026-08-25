@@ -504,5 +504,41 @@ class TestRemoteInstallInstructionsWebSocket(ServerTestCase):
                       "CLIPTUNNEL_REPEATER_TOKEN"):
                 os.environ.pop(k, None)
 
+class TestRegistryToolsRegistration(ServerTestCase):
+    """T5: create_server() registers plugin tools from registry."""
+
+    def test_plugin_tool_appears_in_server(self):
+        """A ToolSpec registered in registry must appear in the FastMCP server."""
+        from cliptunnel_mcp.plugins import registry, ToolSpec, register_builtins
+        if not registry.tool_names():
+            register_builtins(registry)
+
+        # Register a temporary plugin tool
+        def plugin_handler(**kwargs):
+            return "plugin-result"
+
+        spec = ToolSpec(
+            name="test_plugin_tool",
+            description="A test plugin tool",
+            input_schema={"type": "object", "properties": {}},
+            handler=plugin_handler,
+        )
+        registry._tools["test_plugin_tool"] = spec
+        try:
+            mcp = self.server.create_server()
+            tools = asyncio.run(mcp.list_tools())
+            names = {tool.name for tool in tools}
+            self.assertIn("test_plugin_tool", names)
+        finally:
+            registry._tools.pop("test_plugin_tool", None)
+
+    def test_builtin_tools_still_registered(self):
+        """Built-in tools must still be present after registry integration."""
+        tools = asyncio.run(self.mcp.list_tools())
+        names = {tool.name for tool in tools}
+        for expected in ("remote_shell", "remote_sysinfo",
+                         "remote_install_instructions"):
+            self.assertIn(expected, names)
+
 if __name__ == "__main__":
     unittest.main()

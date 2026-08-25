@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
-import json
+import asyncio
 import logging
 import os
 import shlex
@@ -74,6 +74,14 @@ def _get_controller() -> Controller | None:
     with _controller_lock:
         return _controller
 
+
+def _ensure_registry_loaded() -> None:
+    """Ensure register_builtins has run on the module-level registry."""
+    from cliptunnel_mcp import plugins
+    if not plugins._loaded:
+        if not plugins.registry.tool_names():
+            plugins.register_builtins(plugins.registry)
+        plugins._loaded = True
 def _capture_client_info(ctx) -> None:
     """Extract client info from the MCP request context and update the controller.
 
@@ -990,6 +998,24 @@ def create_server():
             "agent_command": "cliptunnel-agent",
         }
         return json.dumps(result)
+
+    # ── Register plugin tools from registry ──────────────────────────────
+    _ensure_registry_loaded()
+    from cliptunnel_mcp.plugins import registry as _registry
+
+    # Collect names of tools already registered via @mcp.tool() decorators
+    _static_tool_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+
+    # Register any registry tools not already statically registered
+    for tool_name, spec in _registry.tools():
+        if tool_name in _static_tool_names:
+            continue
+        mcp.add_tool(
+            spec.handler,
+            name=tool_name,
+            description=spec.description,
+        )
+
     return mcp
 
 
