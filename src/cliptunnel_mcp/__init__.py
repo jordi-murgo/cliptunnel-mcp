@@ -1,5 +1,6 @@
 """cliptunnel-mcp — operate a locked-down remote machine through its clipboard."""
 from cliptunnel_mcp.controller import Controller
+from cliptunnel_mcp.plugins import ExtensionRegistry, ToolSpec, load_plugins, registry
 from cliptunnel_mcp.protocol import (
     BROADCAST_ADDR,
     CONTROLLER_ADDR,
@@ -22,6 +23,7 @@ from cliptunnel_mcp.protocol import (
     validate,
 )
 from cliptunnel_mcp.operations import dispatch
+from cliptunnel_mcp.transport import RevisionMonitor, Transport
 
 try:
     from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -34,12 +36,16 @@ __all__ = [
     "BROADCAST_ADDR",
     "CONTROLLER_ADDR",
     "Controller",
+    "ExtensionRegistry",
     "Message",
     "MsgType",
     "PROTOCOL_SIG",
     "PROTOCOL_SIG_ENC",
     "PROTOCOL_VERSION",
+    "RevisionMonitor",
     "SeqTracker",
+    "ToolSpec",
+    "Transport",
     "dispatch",
     "generate_controller_id",
     "generate_remote_id",
@@ -49,7 +55,9 @@ __all__ = [
     "is_remote",
     "is_valid_from_address",
     "is_valid_to_address",
+    "load_plugins",
     "pack",
+    "registry",
     "unpack",
     "validate",
 ]

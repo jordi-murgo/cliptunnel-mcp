@@ -46,6 +46,10 @@ cliptunnel-agent = "cliptunnel_mcp.agent:main"
 [project.optional-dependencies]
 server = ["mcp>=1.2,<2"]
 
+[project.entry-points."cliptunnel_mcp.plugins"]
+# External plugins register here. Core ships none; the group documents
+# the interface and is populated by third-party packages.
+
 [project.urls]
 Homepage = "https://github.com/jordi-murgo/cliptunnel-mcp"
 Repository = "https://github.com/jordi-murgo/cliptunnel-mcp.git"
