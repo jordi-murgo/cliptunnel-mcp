@@ -1,19 +1,19 @@
 # cliptunnel-mcp
 
-Operate locked-down remote machines through their clipboard, an HTTPS repeater, Firebase, or a WebSocket repeater — with multi-remote support, autonomous agents, clipboard preservation, agent heartbeat, and optional AES-256-GCM encryption.
+Operate locked-down remote machines through their clipboard, an HTTPS repeater, a WebSocket repeater, or Firebase — with multi-remote support, autonomous agents, clipboard preservation, agent heartbeat, and optional AES-256-GCM encryption.
 
 ## What it does
 
 `cliptunnel-mcp` turns a shared clipboard into a reliable control channel between machines. When a remote machine sits behind a Citrix session, a locked-down VDI, or any environment that blocks SSH, file transfer, and networking but still exposes a clipboard, ClipTunnel tunnels commands through that single slot and exposes them as [Model Context Protocol](https://modelcontextprotocol.io) tools.
 
-**v1.0.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, four transport options — clipboard (default), HTTPS repeater, Firebase Realtime Database, and WebSocket repeater — optional AES-256-GCM encryption that works with any transport, sanitized transport endpoint reporting in sysinfo, PowerShell shell execution on Windows, error responses that surface the agent's actual error output, and zombie job detection for commands whose clipboard response was lost.
+**v1.0.0** ships the CT3 wire protocol v3 with prefixed endpoint IDs (`C`/`R` + 7 hex), announce-based discovery, multi-controller awareness, an agent heartbeat that keeps the remote roster self-healing, clipboard preservation that restores the user's clipboard after every exchange, four transport options — clipboard (default), HTTPS repeater, WebSocket repeater, and Firebase Realtime Database — optional AES-256-GCM encryption that works with any transport, sanitized transport endpoint reporting in sysinfo, PowerShell shell execution on Windows, error responses that surface the agent's actual error output, and zombie job detection for commands whose clipboard response was lost.
 
 The package ships four layers:
 
 - **Protocol** — CT3 wire format with prefixed endpoint IDs (`C`/`R` + 7 hex), broadcast routing, heartbeat-based keepalive, announce-based discovery, and typed messages (command, response, error, ack, ping, announce). Optional AES-256-GCM encryption at the protocol level (`CT3E|` prefix) encrypts the payload while keeping the header plaintext for routing.
 - **Endpoints** — `Controller` (operator side) with a remote + controller registry, and multiple `Agent` instances (remote side), each with a unique prefixed ID. Both run background threads with ARQ retransmission, sequence-bound deduplication, and generation-safe lifecycle.
 - **MCP server** — a FastMCP application with 27 tools including shell, filesystem, binary transfer, sysinfo, remote agent management, connection listing, announce-based discovery, and remote install instructions.
-- **Transport layer** — clipboard (default, backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) with user-clipboard preservation), HTTPS repeater (optional, with bearer auth), Firebase Realtime Database (optional, hosted slot with server timestamps), or WebSocket repeater (optional, local or remote relay). All implement the same `Transport` and `RevisionMonitor` protocols — the Controller and Agent are fully transport-agnostic. Encryption is handled at the protocol level, not the transport level.
+- **Transport layer** — clipboard (default, backed by [clipboard-event](https://github.com/jordi-murgo/clipboard-event) with user-clipboard preservation), HTTPS repeater (optional, with bearer auth), WebSocket repeater (optional, local or remote relay), or Firebase Realtime Database (optional, hosted slot with server timestamps). All implement the same `Transport` and `RevisionMonitor` protocols — the Controller and Agent are fully transport-agnostic. Encryption is handled at the protocol level, not the transport level.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ graph LR
     Controller -- "CT3 wire<br/>(clipboard)" --> Agent2
 ```
 
-On startup each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends its sysinfo as a registration response to the broadcast address — no Controller announce needed. The Controller announces later when the MCP server starts (or when `discover()` is called), which triggers agents to re-register. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread marks remotes `dead` if no heartbeat is received within ~420s (3.5× the default heartbeat interval) — no pings are sent. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — the HTTPS transport does not touch the user's clipboard). The Agent also restores the user's clipboard after each registration, since registrations are fire-and-forget.
+On startup each Agent generates a random prefixed ID (`R` + 7 hex), waits a random delay (0.1–4.0s), and sends its sysinfo as a registration response to the broadcast address — no Controller announce needed. The Controller announces later when the MCP server starts (or when `discover()` is called), which triggers agents to re-register. The Controller maintains a registry of all connected remotes and any other controllers it discovers. A keepalive thread marks remotes `dead` if no heartbeat is received within ~420s (3.5× the default heartbeat interval) — no pings are sent. Each Agent additionally runs a **heartbeat** thread that periodically re-sends its registration, so a lost announce response never leaves an agent invisible. After every exchange the Controller **restores the user's clipboard** content that was present before the protocol traffic (clipboard transport only — network transports do not touch the user's clipboard). The Agent also restores the user's clipboard after each registration, since registrations are fire-and-forget.
 
 ### Wire format
 
@@ -130,14 +130,6 @@ sequenceDiagram
 
 With the heartbeat active, the keepalive loop rarely fires — it only marks remotes that have stopped heartbeating for over 7 minutes. A remote that resumes heartbeating is picked up by the registration upsert path and returns to `alive` status.
 
-### Clipboard preservation
-
-The clipboard is the user's real pasteboard, so every protocol write would clobber whatever the user copied. The clipboard transport preserves it:
-
-- **Backup** — the transport observes every clipboard change. Any non-empty value that is not CT3 protocol traffic (`CT3|…`) is retained as the user-clipboard candidate. The backup is also seeded at construction from the initial value, so a startup announce never destroys pre-existing content.
-- **Guarded restore** — after the Controller sends the final ACK of an exchange, it calls `transport.restore_user_clipboard()`. The restore happens **only if the OS clipboard still holds this process's last self-write**; if another process or the user wrote anything in between, the restore is a silent no-op (it would otherwise clobber that content). On success the backup is written back as a self-write.
-This makes the heartbeat and the restore synergistic: a racy restore that clobbers an in-flight message is cured by the next heartbeat, and the user's clipboard survives the protocol traffic. The Agent also restores the user's clipboard after each registration heartbeat, since registrations are fire-and-forget — no controller writes back to clean the slot.
-
 ## Installation
 
 ```bash
@@ -149,7 +141,7 @@ Dependencies: `clipboard-event>=0.2.0` (cross-platform clipboard change notifica
 
 | Binary              | Extra needed | Purpose                                      |
 |---------------------|--------------|----------------------------------------------|
-| `cliptunnel-agent`  | *(none)*     | Runs the Agent (clipboard, HTTPS, Firebase, or WebSocket transport). |
+| `cliptunnel-agent`  | *(none)*     | Runs the Agent (clipboard, HTTPS, WebSocket, or Firebase transport). |
 | `cliptunnel-mcp`    | `[server]`   | Runs the MCP server over stdio.              |
 
 ## Quick start
@@ -167,7 +159,7 @@ cliptunnel-agent
 > python -m cliptunnel_mcp.server   # instead of cliptunnel-mcp
 > ```
 
-The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard (or connects to the repeater / Firebase RTDB / WebSocket repeater if `CLIPTUNNEL_TRANSPORT` is `https`, `firebase`, or `websocket`) for commands. It uses `clipboard-event` for clipboard change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
+The Agent generates a random prefixed ID, registers with the Controller by sending its sysinfo, then watches the clipboard (or connects to the repeater / WebSocket repeater / Firebase RTDB if `CLIPTUNNEL_TRANSPORT` is `https`, `websocket`, or `firebase`) for commands. It uses `clipboard-event` for clipboard change detection (event-driven on Windows and Wayland, polling on macOS and X11). A heartbeat thread re-registers every `CLIPTUNNEL_HEARTBEAT_SECS` (default 120s) so the Controller never loses it; set the variable to `0` or a negative value to disable it.
 
 ### Controller + MCP server (operator machine)
 
@@ -214,7 +206,7 @@ from cliptunnel_mcp.operations import dispatch
 agent = Agent(transport=build_transport(), handler=dispatch)
 # Agent generates its own remote_id, registers automatically, and heartbeats every 120s.
 # Disable the heartbeat with heartbeat_secs=0 (or CLIPTUNNEL_HEARTBEAT_SECS=0).
-# Set CLIPTUNNEL_TRANSPORT=https (repeater) or =firebase (Firebase RTDB)
+# Set CLIPTUNNEL_TRANSPORT=https (repeater), =websocket (WS repeater), or =firebase (Firebase RTDB)
 # to use a network transport instead of the clipboard.
 # Set CLIPTUNNEL_AES_KEY to enable AES-256-GCM encryption on any transport.
 ```
@@ -272,8 +264,8 @@ The server exposes **27 tools** over stdio. Most tools accept an optional `remot
 | Tool | Description |
 |------|-------------|
 | `remote_connections` | List all connected remotes and controllers with sysinfo, `transport_backend`, `transport_endpoint`, `last_seen` (epoch), `last_seen_ago` (seconds), and `status` (alive/dead). |
-| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard, repeater, or Firebase RTDB. |
-| `remote_install_instructions` | Return installation instructions for the remote agent based on the controller's active transport (clipboard, HTTPS, Firebase, or WebSocket). Includes env vars, repeater URL, bearer token, Firebase URL, WebSocket URL, and AES key (if configured). |
+| `remote_discovery` | Broadcast an ANNOUNCE to discover remotes and other controllers on the shared clipboard, repeater, WebSocket repeater, or Firebase RTDB. |
+| `remote_install_instructions` | Return installation instructions for the remote agent based on the controller's active transport (clipboard, HTTPS, WebSocket, or Firebase). Includes env vars, repeater URL, bearer token, WebSocket URL, Firebase URL, and AES key (if configured). |
 
 ## Operations
 
@@ -360,20 +352,6 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 
 Constructor parameters: `repeater_url` (required), `bearer_token` (required), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `poll_timeout`, `request_timeout`.
 
-### `FirebaseTransport`
-
-| Method | Description |
-|--------|-------------|
-| `read() -> str` | Return the current cached value (never blocks, never raises). |
-| `write(value: str)` | PUT the node to Firebase RTDB, adopt the server timestamp as revision, notify waiters. Raises `TransportAuthError` on 401/403, `TransportError` on other failures. |
-| `revision` property | Current revision (the node's server timestamp in ms). |
-| `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
-| `backend_name` property | Returns `"firebase"`. |
-| `endpoint` property | Returns the database URL (sanitized, no auth token). |
-
-
-Constructor parameters: `database_url` (required), `auth_token` (required), `node_path` (default `"cliptunnel"`), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `request_timeout`.
-
 ### `WebSocketTransport`
 
 Transport + RevisionMonitor backed by a WebSocket repeater using a JSON frame protocol.
@@ -390,11 +368,23 @@ Transport + RevisionMonitor backed by a WebSocket repeater using a JSON frame pr
 
 Constructor parameters: `ws_url` (required), `bearer_token` (required), `poll_timeout`, `reconnect_delay`, `reconnect_max_delay`, `request_timeout`, `ws_client` (optional, injectable for tests).
 
+### `FirebaseTransport`
+
+| Method | Description |
+|--------|-------------|
+| `read() -> str` | Return the current cached value (never blocks, never raises). |
+| `write(value: str)` | PUT the node to Firebase RTDB, adopt the server timestamp as revision, notify waiters. Raises `TransportAuthError` on 401/403, `TransportError` on other failures. |
+| `revision` property | Current revision (the node's server timestamp in ms). |
+| `wait_for_change(after, timeout) -> int` | Block until revision > after or timeout. Never raises on timeout. |
+| `backend_name` property | Returns `"firebase"`. |
+| `endpoint` property | Returns the database URL (sanitized, no auth token). |
+
+Constructor parameters: `database_url` (required), `auth_token` (required), `node_path` (default `"cliptunnel"`), `http_client` (optional, injectable for tests), `sse_reconnect_delay`, `request_timeout`.
+
 ### `build_transport()` factory
 
 | Function | Description |
-|----------|-------------|
-| `build_transport() -> Transport` | Resolve `CLIPTUNNEL_TRANSPORT` (env var, or config file `[transport] type`) and return a `ClipboardTransport` (default), `HttpsTransport`, `FirebaseTransport`, or `WebSocketTransport`. Raises `ValueError` on missing required settings or unknown transport. Precedence: env var > config file > default. Encryption is handled at the protocol level when `CLIPTUNNEL_AES_KEY` is set — `build_transport()` does not wrap the transport. |
+| `build_transport() -> Transport` | Resolve `CLIPTUNNEL_TRANSPORT` (env var, or config file `[transport] type`) and return a `ClipboardTransport` (default), `HttpsTransport`, `WebSocketTransport`, or `FirebaseTransport`. Raises `ValueError` on missing required settings or unknown transport. Precedence: env var > config file > default. Encryption is handled at the protocol level when `CLIPTUNNEL_AES_KEY` is set — `build_transport()` does not wrap the transport. |
 
 ### `crypto` module
 
@@ -416,19 +406,6 @@ Constructor parameters: `ws_url` (required), `bearer_token` (required), `poll_ti
 | `Message` | Dataclass: `frm`, `to`, `seq`, `mtype`, `payload`. |
 | `MsgType` | Enum: `COMMAND`, `RESPONSE`, `ERROR`, `ACK`, `PING`, `ANNOUNCE`. |
 | `SeqTracker` | Per-seq dedupe state: new → processing → done. |
-
-## Clipboard backend
-
-ClipTunnel uses [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform clipboard access and change detection:
-
-| Platform | Backend | Change detection | Latency |
-|----------|---------|------------------|---------|
-| macOS | NSPasteboard `changeCount` | Polling (50ms) | ~50ms |
-| Windows | `WM_CLIPBOARD_UPDATE` | Event-driven | Sub-ms |
-| Linux / Wayland | `wl-paste --watch` | Event-driven | Sub-ms |
-| Linux / X11 | `xclip`/`xsel` | Polling (100ms) | ~100ms |
-
-The `ClipboardTransport` adapts clipboard-event to the `Transport` and `RevisionMonitor` protocols, backs up non-protocol clipboard content, and guards restores against concurrent writers. For custom setups, implement the `Transport` protocol directly.
 
 ## Platform support
 
@@ -476,8 +453,7 @@ The test suite uses a deterministic `ClipboardSlot` test double. No clipboard ha
 
 - **Text-only clipboard**: the protocol carries UTF-8 strings, and the preservation backup is text-only. Binary files are base64-encoded; rich content (images, RTF) copied by the user is not preserved by the restore.
 - **Shared slot**: multiple remotes and controllers share one clipboard; the protocol serializes all traffic, and announce responses can race (mitigated by the heartbeat).
-- **No wire encryption by default**: the CT3 wire format is plain base64. Set `CLIPTUNNEL_AES_KEY` to enable AES-256-GCM encryption on any transport (clipboard, HTTPS, Firebase, or WebSocket).
-- **Multi-controller**: multiple controllers are discovered and tracked. With the clipboard transport they share one channel; with the HTTPS transport they share one repeater slot. The protocol is designed for one primary Controller and multiple Agents.
+- **No wire encryption by default**: the CT3 wire format is plain base64. Set `CLIPTUNNEL_AES_KEY` to enable AES-256-GCM encryption on any transport (clipboard, HTTPS, WebSocket, or Firebase).
 - **CT3-looking user content**: if the user copies a string starting with `CT3|`, it is treated as protocol traffic and not backed up.
 
 ## Configuration
@@ -501,9 +477,11 @@ Full annotated example covering every supported section:
 # ~/.cliptunnel/config.toml
 
 [transport]
-type = "clipboard"                  # "clipboard" (default), "https", "firebase", or "websocket"
+type = "clipboard"                  # "clipboard" (default), "https", "websocket", or "firebase"
 repeater_url = "https://repeater.example.com"   # required when type = "https"
 repeater_token = "agent-bearer-token"           # required when type = "https"
+ws_url = "ws://relay:9000"                       # required when type = "websocket"
+ws_token = "ws-bearer-token"                    # required when type = "websocket"
 firebase_url = "https://NAME-default-rtdb.firebaseio.com"  # required when type = "firebase"
 firebase_token = "firebase-auth-token"                     # required when type = "firebase"
 
@@ -529,13 +507,13 @@ oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes pr
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard`, `https`, `firebase`, or `websocket`. Case-insensitive. |
+| `CLIPTUNNEL_TRANSPORT` | `clipboard` | no | Transport: `clipboard`, `https`, `websocket`, or `firebase`. Case-insensitive. |
 | `CLIPTUNNEL_REPEATER_URL` | — | yes (https) | Repeater URL, e.g. `https://repeater.example.com`. |
 | `CLIPTUNNEL_REPEATER_TOKEN` | — | yes (https) | Bearer token for repeater authentication. |
-| `CLIPTUNNEL_FIREBASE_URL` | — | yes (firebase) | Firebase RTDB base URL, e.g. `https://NAME-default-rtdb.firebaseio.com`. Must use https. |
-| `CLIPTUNNEL_FIREBASE_TOKEN` | — | yes (firebase) | Firebase auth token (sent as `?auth=` query param and bearer header). |
 | `CLIPTUNNEL_WS_URL` | — | yes (websocket) | WebSocket repeater URL, e.g. `ws://relay:9000` or `wss://relay:9000`. |
 | `CLIPTUNNEL_WS_TOKEN` | — | yes (websocket) | Bearer token for WebSocket repeater authentication. |
+| `CLIPTUNNEL_FIREBASE_URL` | — | yes (firebase) | Firebase RTDB base URL, e.g. `https://NAME-default-rtdb.firebaseio.com`. Must use https. |
+| `CLIPTUNNEL_FIREBASE_TOKEN` | — | yes (firebase) | Firebase auth token (sent as `?auth=` query param and bearer header). |
 
 ### Encryption (Controller and Agent)
 
@@ -564,11 +542,47 @@ oauth_token = "gho_xxxxxxxxxxxxxxxxxxxx"  # GitHub Copilot OAuth token; takes pr
 | `[copilot] oauth_token` (config file) | — | no | GitHub Copilot OAuth token; checked before the legacy file. |
 | `.copilot_agent_token` | — | no | Legacy fallback: file in the agent working directory containing the GitHub Copilot token. Created by `remote_agent_login`. |
 
-## HTTPS repeater transport
+## Transports
+
+ClipTunnel supports four transports, all implementing the same `Transport` and `RevisionMonitor` protocols. The Controller and Agent are fully transport-agnostic — encryption is handled at the protocol level, not the transport level. Set `CLIPTUNNEL_TRANSPORT` (env var or config file `[transport] type`) to select one.
+
+### Clipboard transport (default)
+
+The clipboard transport uses the machine's shared clipboard as the slot. No infrastructure, no network — just the clipboard that already exists between a Citrix session, a VDI, or any environment that exposes one.
+
+#### When to use it
+
+- The remote machine shares a clipboard with the operator (Citrix, VDI, local machine).
+- No network connectivity is available or allowed.
+- You want zero infrastructure.
+
+#### Clipboard preservation
+
+The clipboard is the user's real pasteboard, so every protocol write would clobber whatever the user copied. The clipboard transport preserves it:
+
+- **Backup** — the transport observes every clipboard change. Any non-empty value that is not CT3 protocol traffic (`CT3|…`) is retained as the user-clipboard candidate. The backup is also seeded at construction from the initial value, so a startup announce never destroys pre-existing content.
+- **Guarded restore** — after the Controller sends the final ACK of an exchange, it calls `transport.restore_user_clipboard()`. The restore happens **only if the OS clipboard still holds this process's last self-write**; if another process or the user wrote anything in between, the restore is a silent no-op (it would otherwise clobber that content). On success the backup is written back as a self-write.
+
+This makes the heartbeat and the restore synergistic: a racy restore that clobbers an in-flight message is cured by the next heartbeat, and the user's clipboard survives the protocol traffic. The Agent also restores the user's clipboard after each registration heartbeat, since registrations are fire-and-forget — no controller writes back to clean the slot.
+
+#### Clipboard backend
+
+ClipTunnel uses [clipboard-event](https://github.com/jordi-murgo/clipboard-event) for cross-platform clipboard access and change detection:
+
+| Platform | Backend | Change detection | Latency |
+|----------|---------|------------------|---------|
+| macOS | NSPasteboard `changeCount` | Polling (50ms) | ~50ms |
+| Windows | `WM_CLIPBOARD_UPDATE` | Event-driven | Sub-ms |
+| Linux / Wayland | `wl-paste --watch` | Event-driven | Sub-ms |
+| Linux / X11 | `xclip`/`xsel` | Polling (100ms) | ~100ms |
+
+For custom setups, implement the `Transport` protocol directly.
+
+### HTTPS repeater transport
 
 When the clipboard channel is unavailable (no shared clipboard across networks), monitored by DLP agents, or you need NAT traversal, ClipTunnel can use an **HTTPS repeater** as an alternative transport. Both the Controller and Agent are outbound HTTPS clients of a small relay service — no inbound ports needed on the remote machine.
 
-### Architecture
+#### Architecture
 
 ```
 Controller  <--HTTPS/SSE-->  Repeater  <--HTTPS/SSE-->  Agent
@@ -577,13 +591,13 @@ Controller  <--HTTPS/SSE-->  Repeater  <--HTTPS/SSE-->  Agent
 
 The repeater is a **zero-knowledge relay**: it authenticates peers via bearer tokens but cannot decrypt content. When AES is enabled, the repeater never sees plaintext even if TLS is terminated at its edge.
 
-### When to use it
+#### When to use it
 
 - The remote machine has outbound HTTPS but no inbound reachability (NAT, firewall).
 - The clipboard channel is monitored, filtered, or unreliable (DLP).
 - You want traffic that blends with normal web API usage rather than clipboard data movement.
 
-### Setup
+#### Setup
 
 1. **Deploy a repeater.** Run the repeater service (see below) at a URL the Agent can reach. Deploy behind a TLS proxy (Caddy, Cloudflare, API Gateway).
 
@@ -592,7 +606,7 @@ The repeater is a **zero-knowledge relay**: it authenticates peers via bearer to
 
 4. **Start the Agent.** On the remote VDI, run `cliptunnel-agent` with the environment variables from the install instructions. The Agent connects outbound to the repeater via HTTPS.
 
-### Environment variables
+#### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -600,31 +614,9 @@ The repeater is a **zero-knowledge relay**: it authenticates peers via bearer to
 | `CLIPTUNNEL_REPEATER_URL` | — | (HTTPS only) Repeater URL, e.g. `https://repeater.example.com`. Required when transport is `https`. |
 | `CLIPTUNNEL_REPEATER_TOKEN` | — | (HTTPS only) Bearer token for repeater authentication. Required when transport is `https`. |
 | `CLIPTUNNEL_AES_KEY` | — | (optional) Base64-encoded 32-byte AES-256 key. When set, `pack()`/`unpack()` encrypt the payload with AES-256-GCM using the `CT3E\|` wire format. Works with any transport. The repeater never sees plaintext. |
-| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | Heartbeat interval in seconds. `<= 0` disables. Works with both transports. |
+| `CLIPTUNNEL_HEARTBEAT_SECS` | `120` | Heartbeat interval in seconds. `<= 0` disables. Works with all transports. |
 
-### AES-256-GCM encryption
-
-When `CLIPTUNNEL_AES_KEY` is set, the Controller and Agent encrypt at the **protocol level** — `pack()` produces a `CT3E|from|to|seq|type|base64(ciphertext)` wire string where only the payload is AES-256-GCM encrypted and the header (`from`, `to`, `seq`, `type`) stays plaintext. This lets repeater/relay transports route by address without decrypting. The format of the encrypted payload field is `base64(nonce[12] ‖ ciphertext+tag[16])`.
-
-This works with **any transport** — clipboard, HTTPS, Firebase, or WebSocket. The repeater, the Firebase database, and the clipboard never see plaintext. Encryption is handled inside `pack()`/`unpack()`; no transport wrapping is needed.
-
-Generate a key:
-
-```bash
-python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
-# or, equivalently:
-openssl rand -base64 32
-```
-
-Set it on both the Controller and the Agent (out-of-band, not over the channel):
-
-```bash
-export CLIPTUNNEL_AES_KEY=<the base64 string from above>
-```
-
-If `CLIPTUNNEL_AES_KEY` is not set, the protocol uses plaintext mode (`CT3|` with base64 payload). Encryption is optional and backward-compatible.
-
-### Repeater service
+#### Repeater service
 
 The repeater is a small stdlib-only HTTP service (no third-party deps). For production deployment with automatic HTTPS, see [`deploy/`](deploy/) for Docker + Caddy and Cloudflare Tunnel guides.
 
@@ -651,48 +643,11 @@ The repeater has three endpoints, all requiring `Authorization: Bearer <token>`:
 
 The repeater state is ephemeral (in-memory). On restart, peers self-heal via the heartbeat mechanism. No database, no disk.
 
-### Install instructions tool
-
-The `remote_install_instructions` MCP tool returns installation instructions for the remote agent based on the Controller's active transport:
-
-- **Clipboard**: returns `pip install cliptunnel-mcp` and `cliptunnel-agent` (no env vars needed).
-- **HTTPS**: returns `pip install cliptunnel-mcp`, the repeater URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
-- **Firebase**: returns `pip install cliptunnel-mcp`, the Firebase URL, auth token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
-- **WebSocket**: returns `pip install cliptunnel-mcp`, the WebSocket URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
-
-> **Security**: the tool output contains sensitive config (tokens, AES key). Do not log it or share it insecurely. The tool returns instructions for the operator, not a script that auto-executes.
-
-### Install extras
-
-```bash
-pip install cliptunnel-mcp          # core + clipboard transport + AES encryption (cryptography included)
-pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
-```
-
-## Firebase transport
-
-When you have no machine to host the HTTPS repeater on, ClipTunnel can use a **Firebase Realtime Database** as the shared slot instead — free tier, no server to deploy, outbound HTTPS only on both sides.
-
-The slot is one JSON node (default path `/cliptunnel`) shaped `{"v": "<wire string>", "r": <server timestamp ms>}`. Writes are REST `PUT`s with `{".sv": "timestamp"}` so Firebase stamps `r` from its server clock — a monotonic revision shared by all writers. Updates stream back over Server-Sent Events, with snapshot resync on reconnect, exactly like the HTTPS transport.
-
-Prefer it over the self-hosted repeater when you want zero infrastructure and can tolerate Google as the host; prefer the repeater when you want the relay to be a zero-knowledge service you control. Note that the database admin can see node contents — AES encryption (`CLIPTUNNEL_AES_KEY`) composes identically here and is strongly recommended, since without it the RTDB stores the CT3 wire string in plaintext.
-
-Configure both sides:
-
-```toml
-[transport]
-type = "firebase"
-firebase_url = "https://NAME-default-rtdb.firebaseio.com"   # https only
-firebase_token = "database-or-oauth-token"
-```
-
-Or via env vars: `CLIPTUNNEL_TRANSPORT=firebase` with `CLIPTUNNEL_FIREBASE_URL` and `CLIPTUNNEL_FIREBASE_TOKEN`. Auth failures (HTTP 401/403) raise `TransportAuthError`; both peers self-heal via the heartbeat.
-
-## WebSocket transport
+### WebSocket repeater transport
 
 When you want a persistent bidirectional channel with lower latency than SSE-based polling, ClipTunnel can use a **WebSocket repeater** as the shared slot. Both the Controller and Agent are outbound WebSocket clients of a small relay service — no inbound ports needed on the remote machine.
 
-### Architecture
+#### Architecture
 
 ```
 Controller  <--WebSocket-->  WS Repeater  <--WebSocket-->  Agent
@@ -701,13 +656,13 @@ Controller  <--WebSocket-->  WS Repeater  <--WebSocket-->  Agent
 
 The repeater is a **zero-knowledge relay**: it authenticates peers via bearer tokens but cannot decrypt content. When AES is enabled, the repeater never sees plaintext.
 
-### When to use it
+#### When to use it
 
 - You want lower latency than the HTTPS repeater's SSE polling.
 - You prefer a single persistent connection over repeated HTTP requests.
 - You need a lightweight relay that is easier to self-host than an HTTPS service.
 
-### Setup
+#### Setup
 
 1. **Deploy a WS repeater.** Run the repeater service (see below) at a URL the Agent can reach. Deploy behind a TLS proxy (Caddy, Cloudflare, etc.) for `wss://`.
 
@@ -717,7 +672,7 @@ The repeater is a **zero-knowledge relay**: it authenticates peers via bearer to
 
 4. **Start the Agent.** On the remote VDI, run `cliptunnel-agent` with the environment variables from the install instructions. The Agent connects outbound to the repeater via WebSocket.
 
-### Frame protocol
+#### Frame protocol
 
 The WS repeater uses a JSON frame protocol (one JSON object per WS message):
 
@@ -732,7 +687,7 @@ The WS repeater uses a JSON frame protocol (one JSON object per WS message):
 | Repeater → client | `pong` | `{"type": "pong"}` — keepalive reply |
 | Repeater → client | `error` | `{"type": "error", "code": "unauthorized"}` — auth failure |
 
-### WS repeater service
+#### WS repeater service
 
 The repeater is a small asyncio WebSocket service using the `websockets` library. For production deployment with TLS, see [`deploy/`](deploy/) for Docker + Caddy guides.
 
@@ -751,6 +706,65 @@ WS repeater environment variables:
 | `REPEATER_TLS_KEY` | — | Path to TLS key file (optional, for `wss://`). |
 
 The repeater state is ephemeral (in-memory). On restart, peers self-heal via the heartbeat mechanism. No database, no disk.
+
+### Firebase transport
+
+When you have no machine to host the HTTPS or WebSocket repeater on, ClipTunnel can use a **Firebase Realtime Database** as the shared slot instead — free tier, no server to deploy, outbound HTTPS only on both sides.
+
+The slot is one JSON node (default path `/cliptunnel`) shaped `{"v": "<wire string>", "r": <server timestamp ms>}`. Writes are REST `PUT`s with `{".sv": "timestamp"}` so Firebase stamps `r` from its server clock — a monotonic revision shared by all writers. Updates stream back over Server-Sent Events, with snapshot resync on reconnect, exactly like the HTTPS transport.
+
+Prefer it over the self-hosted repeaters when you want zero infrastructure and can tolerate Google as the host; prefer the repeaters when you want the relay to be a zero-knowledge service you control. Note that the database admin can see node contents — AES encryption (`CLIPTUNNEL_AES_KEY`) composes identically here and is strongly recommended, since without it the RTDB stores the CT3 wire string in plaintext.
+
+Configure both sides:
+
+```toml
+[transport]
+type = "firebase"
+firebase_url = "https://NAME-default-rtdb.firebaseio.com"   # https only
+firebase_token = "database-or-oauth-token"
+```
+
+Or via env vars: `CLIPTUNNEL_TRANSPORT=firebase` with `CLIPTUNNEL_FIREBASE_URL` and `CLIPTUNNEL_FIREBASE_TOKEN`. Auth failures (HTTP 401/403) raise `TransportAuthError`; both peers self-heal via the heartbeat.
+
+### AES-256-GCM encryption (all transports)
+
+When `CLIPTUNNEL_AES_KEY` is set, the Controller and Agent encrypt at the **protocol level** — `pack()` produces a `CT3E|from|to|seq|type|base64(ciphertext)` wire string where only the payload is AES-256-GCM encrypted and the header (`from`, `to`, `seq`, `type`) stays plaintext. This lets repeater/relay transports route by address without decrypting. The format of the encrypted payload field is `base64(nonce[12] ‖ ciphertext+tag[16])`.
+
+This works with **any transport** — clipboard, HTTPS, WebSocket, or Firebase. The repeater, the Firebase database, and the clipboard never see plaintext. Encryption is handled inside `pack()`/`unpack()`; no transport wrapping is needed.
+
+Generate a key:
+
+```bash
+python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+# or, equivalently:
+openssl rand -base64 32
+```
+
+Set it on both the Controller and the Agent (out-of-band, not over the channel):
+
+```bash
+export CLIPTUNNEL_AES_KEY=<the base64 string from above>
+```
+
+If `CLIPTUNNEL_AES_KEY` is not set, the protocol uses plaintext mode (`CT3|` with base64 payload). Encryption is optional and backward-compatible.
+
+### Install instructions tool
+
+The `remote_install_instructions` MCP tool returns installation instructions for the remote agent based on the Controller's active transport:
+
+- **Clipboard**: returns `pip install cliptunnel-mcp` and `cliptunnel-agent` (no env vars needed).
+- **HTTPS**: returns `pip install cliptunnel-mcp`, the repeater URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
+- **WebSocket**: returns `pip install cliptunnel-mcp`, the WebSocket URL, bearer token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
+- **Firebase**: returns `pip install cliptunnel-mcp`, the Firebase URL, auth token, AES key (if set), and the full `cliptunnel-agent` command with env-var prefixes.
+
+> **Security**: the tool output contains sensitive config (tokens, AES key). Do not log it or share it insecurely. The tool returns instructions for the operator, not a script that auto-executes.
+
+### Install extras
+
+```bash
+pip install cliptunnel-mcp          # core + clipboard transport + AES encryption (cryptography included)
+pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
+```
 
 ## License
 
