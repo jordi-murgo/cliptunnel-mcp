@@ -100,6 +100,7 @@ class TestRepeaterHTTP(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._srv.shutdown()
+        self._srv.server_close()
 
     @property
     def _url(self) -> str:
@@ -221,6 +222,7 @@ class TestRepeaterHTTP(unittest.TestCase):
             self.assertEqual(exc.exception.code, 401)
         finally:
             srv.shutdown()
+            srv.server_close()
 
 
 if __name__ == "__main__":
