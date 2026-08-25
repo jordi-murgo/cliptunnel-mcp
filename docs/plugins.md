@@ -122,8 +122,8 @@ Tools registered via the registry that are not already statically registered by 
 ```python
 def register(registry: ExtensionRegistry) -> None:
     registry.register_config_section("myplugin", {
-        "MYTRANSPORT_URL": (("myplugin", "url"),),
-        "MYTRANSPORT_TOKEN": (("myplugin", "token"),),
+        "MYTRANSPORT_URL": (("myplugin",), "url"),
+        "MYTRANSPORT_TOKEN": (("myplugin",), "token"),
     })
 ```
 

@@ -133,12 +133,40 @@ class ExtensionRegistry:
         return self._install_instructions[transport_name]
 
 
+    # ── Internal snapshot/rollback for plugin load failure ────────────────
+
+    def _snapshot(self) -> dict:
+        """Capture current registry state for rollback on plugin failure."""
+        return {
+            "transports": set(self._transports.keys()),
+            "ops": set(self._ops.keys()),
+            "tools": set(self._tools.keys()),
+            "config": set(self._config_sections.keys()),
+            "install": set(self._install_instructions.keys()),
+        }
+
+    def _rollback(self, snap: dict) -> None:
+        """Remove all registrations added after the snapshot was taken."""
+        for name in list(self._transports.keys() - snap["transports"]):
+            del self._transports[name]
+        for name in list(self._ops.keys() - snap["ops"]):
+            del self._ops[name]
+        for name in list(self._tools.keys() - snap["tools"]):
+            del self._tools[name]
+        for name in list(self._config_sections.keys() - snap["config"]):
+            del self._config_sections[name]
+        for name in list(self._install_instructions.keys() - snap["install"]):
+            del self._install_instructions[name]
+
 # ── Singleton instance ────────────────────────────────────────────────────
 
 registry = ExtensionRegistry()
 
 # Double-load protection flag — set to True after register_builtins() runs.
-_loaded: bool = False
+# Built-in registration flag — prevents double-registering built-ins on the singleton.
+_builtins_loaded: bool = False
+# Plugin loading flag — prevents double-loading external plugins on the singleton.
+_plugins_loaded: bool = False
 
 
 # ── Built-in registration ──────────────────────────────────────────────────
@@ -723,11 +751,10 @@ def _register_server_tools(reg: ExtensionRegistry, server) -> None:
         if helper is not None:
             handler = _make_tool_handler(helper)
         else:
-            handler = _make_special_tool_handler(name)
+            handler = _make_special_tool_handler(name, reg)
         reg.register_tool(name, ToolSpec(name=name, description=desc, input_schema=schema, handler=handler))
 
-
-def _make_special_tool_handler(name: str) -> Callable:
+def _make_special_tool_handler(name: str, reg: ExtensionRegistry) -> Callable:
     """Create a handler for tools that don't map to a single helper function."""
     if name == "remote_connections":
         def handler(**kwargs):
@@ -752,7 +779,7 @@ def _make_special_tool_handler(name: str) -> Callable:
         def handler(**kwargs):
             from cliptunnel_mcp import config
             transport = config.get_env("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
-            emitter = registry.get_install_instructions(transport)
+            emitter = reg.get_install_instructions(transport)
             return emitter({})
         return handler
     else:
@@ -816,29 +843,35 @@ def _load_local_plugin(path: str, name: str, reg: ExtensionRegistry) -> None:
 def load_plugins(reg: ExtensionRegistry | None = None) -> None:
     """Discover and load external plugins into *reg* (default: module singleton).
 
+    Ensures built-ins are registered first, then discovers external plugins.
     Loading order:
-      1. Entry points in group ``cliptunnel_mcp.plugins`` (sorted by name).
-      2. ``.py`` files from the local plugin directory (sorted by filename),
+      1. Built-in transports/ops/tools/config (via register_builtins).
+      2. Entry points in group ``cliptunnel_mcp.plugins`` (sorted by name).
+      3. ``.py`` files from the local plugin directory (sorted by filename),
          default ``~/.cliptunnel/plugins/``, overridable via
          ``CLIPTUNNEL_PLUGINS_DIR``.
 
     Errors per plugin are logged as warnings and the plugin is skipped.
-    Sets ``_loaded`` to ``True`` to prevent double-loading.
+    If a plugin partially registers before failing, its registrations are
+    rolled back so a failed plugin cannot leave the registry in a partial state.
+    Sets ``_plugins_loaded`` to ``True`` to prevent double-loading.
     """
-    global _loaded
-    if _loaded:
+    global _plugins_loaded
+    if _plugins_loaded:
         return
     if reg is None:
         reg = registry
 
     # ── Entry-point plugins ────────────────────────────────────────────────
     for ep in _discover_entry_point_plugins():
+        snap = reg._snapshot()
         try:
             mod = ep.load()
             register_fn = getattr(mod, "register", None)
             if register_fn is not None:
                 register_fn(reg)
         except Exception:
+            reg._rollback(snap)
             import logging
             import traceback
 
@@ -850,12 +883,14 @@ def load_plugins(reg: ExtensionRegistry | None = None) -> None:
         os.path.join(os.path.expanduser("~"), ".cliptunnel", "plugins"),
     )
     for fname, fpath in _discover_local_dir_plugins(plugins_dir):
+        snap = reg._snapshot()
         try:
             _load_local_plugin(fpath, fname[:-3], reg)
         except Exception:
+            reg._rollback(snap)
             import logging
             import traceback
 
             logging.warning("local plugin '%s' failed to load: %s", fname, traceback.format_exc())
 
-    _loaded = True
+    _plugins_loaded = True

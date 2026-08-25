@@ -231,14 +231,14 @@ class TestRegistryLoadedFlag(unittest.TestCase):
     def test_loaded_flag_starts_false(self):
         from cliptunnel_mcp import plugins
         # _loaded should exist; reset to False for test isolation
-        plugins._loaded = False
-        self.assertFalse(plugins._loaded)
+        plugins._plugins_loaded = False
+        self.assertFalse(plugins._plugins_loaded)
 
     def test_loaded_flag_set_true(self):
         from cliptunnel_mcp import plugins
-        plugins._loaded = True
-        self.assertTrue(plugins._loaded)
-        plugins._loaded = False  # cleanup
+        plugins._plugins_loaded = True
+        self.assertTrue(plugins._plugins_loaded)
+        plugins._plugins_loaded = False  # cleanup
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -357,14 +357,14 @@ class TestLoadPluginsEntryPointDiscovery(unittest.TestCase):
 
     def setUp(self):
         from cliptunnel_mcp import plugins
-        self._old_loaded = plugins._loaded
-        plugins._loaded = False
+        self._old_loaded = plugins._plugins_loaded
+        plugins._plugins_loaded = False
         # Fresh registry without builtins
         self._reg = ExtensionRegistry()
 
     def tearDown(self):
         from cliptunnel_mcp import plugins
-        plugins._loaded = self._old_loaded
+        plugins._plugins_loaded = self._old_loaded
 
     def test_entry_point_plugin_registers_op(self):
         """A fake entry-point plugin registers its op in the registry."""
@@ -412,15 +412,15 @@ class TestLoadPluginsLocalDir(unittest.TestCase):
 
     def setUp(self):
         from cliptunnel_mcp import plugins
-        self._old_loaded = plugins._loaded
-        plugins._loaded = False
+        self._old_loaded = plugins._plugins_loaded
+        plugins._plugins_loaded = False
         self._reg = ExtensionRegistry()
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
 
     def tearDown(self):
         from cliptunnel_mcp import plugins
-        plugins._loaded = self._old_loaded
+        plugins._plugins_loaded = self._old_loaded
 
     def test_local_dir_plugin_registers_op(self):
         """A .py file in the plugins dir registers its op."""
@@ -463,13 +463,13 @@ class TestLoadPluginsErrorHandling(unittest.TestCase):
 
     def setUp(self):
         from cliptunnel_mcp import plugins
-        self._old_loaded = plugins._loaded
-        plugins._loaded = False
+        self._old_loaded = plugins._plugins_loaded
+        plugins._plugins_loaded = False
         self._reg = ExtensionRegistry()
 
     def tearDown(self):
         from cliptunnel_mcp import plugins
-        plugins._loaded = self._old_loaded
+        plugins._plugins_loaded = self._old_loaded
 
     def test_broken_entry_point_skipped(self):
         """A broken entry point is skipped; other plugins still load."""
@@ -531,13 +531,13 @@ class TestLoadPluginsDoubleLoadPrevention(unittest.TestCase):
 
     def setUp(self):
         from cliptunnel_mcp import plugins
-        self._old_loaded = plugins._loaded
-        plugins._loaded = False
+        self._old_loaded = plugins._plugins_loaded
+        plugins._plugins_loaded = False
         self._reg = ExtensionRegistry()
 
     def tearDown(self):
         from cliptunnel_mcp import plugins
-        plugins._loaded = self._old_loaded
+        plugins._plugins_loaded = self._old_loaded
 
     def test_loaded_flag_set_after_load(self):
         """After load_plugins runs, _loaded is True."""
@@ -545,7 +545,7 @@ class TestLoadPluginsDoubleLoadPrevention(unittest.TestCase):
         with mock.patch("importlib.metadata.entry_points", return_value={}):
             with mock.patch.dict(os.environ, {"CLIPTUNNEL_PLUGINS_DIR": "/nonexistent"}):
                 load_plugins(self._reg)
-        self.assertTrue(plugins._loaded)
+        self.assertTrue(plugins._plugins_loaded)
 
     def test_double_load_no_op(self):
         """Calling load_plugins twice does not re-load."""
@@ -614,8 +614,8 @@ class TestFakePluginEndToEnd(unittest.TestCase):
 
     def setUp(self):
         from cliptunnel_mcp import plugins
-        self._old_loaded = plugins._loaded
-        plugins._loaded = False
+        self._old_loaded = plugins._plugins_loaded
+        plugins._plugins_loaded = False
         self._reg = ExtensionRegistry()
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -628,7 +628,7 @@ class TestFakePluginEndToEnd(unittest.TestCase):
 
     def tearDown(self):
         from cliptunnel_mcp import plugins
-        plugins._loaded = self._old_loaded
+        plugins._plugins_loaded = self._old_loaded
 
     def test_fake_transport_registered(self):
         """The fake plugin registers a 'fake' transport."""

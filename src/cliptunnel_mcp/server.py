@@ -79,10 +79,10 @@ def _get_controller() -> Controller | None:
 def _ensure_registry_loaded() -> None:
     """Ensure register_builtins has run on the module-level registry."""
     from cliptunnel_mcp import plugins
-    if not plugins._loaded:
+    if not plugins._builtins_loaded:
         if not plugins.registry.tool_names():
             plugins.register_builtins(plugins.registry)
-        plugins._loaded = True
+        plugins._builtins_loaded = True
 def _capture_client_info(ctx) -> None:
     """Extract client info from the MCP request context and update the controller.
 
@@ -914,6 +914,7 @@ def create_server():
             spec.handler,
             name=tool_name,
             description=spec.description,
+            input_schema=spec.input_schema,
         )
 
     return mcp
@@ -950,8 +951,10 @@ def main() -> None:
 
     # Apply the --config override before anything resolves settings.
     config.set_config_path(args.config)
-
-    # Load external plugins (entry points + local dir) after builtins.
+    # Ensure built-ins are registered, then load external plugins.
+    from cliptunnel_mcp.plugins import registry, register_builtins
+    if not registry.transport_names():
+        register_builtins(registry)
     from cliptunnel_mcp.plugins import load_plugins
     load_plugins()
     from cliptunnel_mcp.transport_factory import build_transport

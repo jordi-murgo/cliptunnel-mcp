@@ -336,9 +336,9 @@ class TestRegistryDispatch(unittest.TestCase):
     def test_dispatch_uses_registry_for_lookup(self):
         """Monkey-patch a new op into registry; dispatch must call it."""
         from cliptunnel_mcp import plugins
-        if not plugins._loaded:
+        if not plugins._builtins_loaded:
             plugins.register_builtins(plugins.registry)
-            plugins._loaded = True
+            plugins._builtins_loaded = True
 
         called = []
         def custom_handler(req):

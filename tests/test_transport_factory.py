@@ -513,8 +513,8 @@ class TestRegistryLookup(unittest.TestCase):
         """build_transport() ensures register_builtins has run."""
         from cliptunnel_mcp import plugins
         # Reset _loaded flag to verify build_transport triggers load
-        old_loaded = plugins._loaded
-        plugins._loaded = False
+        old_loaded = plugins._builtins_loaded
+        plugins._builtins_loaded = False
         try:
             env = _EnvGuard()
             try:
@@ -522,11 +522,11 @@ class TestRegistryLookup(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     build_transport()
                 # After calling build_transport, _loaded should be True
-                self.assertTrue(plugins._loaded)
+                self.assertTrue(plugins._builtins_loaded)
             finally:
                 env.restore()
         finally:
-            plugins._loaded = old_loaded
+            plugins._builtins_loaded = old_loaded
 
 if __name__ == "__main__":
     unittest.main()

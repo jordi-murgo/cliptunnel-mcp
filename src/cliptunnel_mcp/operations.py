@@ -26,10 +26,10 @@ import subprocess
 def _ensure_loaded() -> None:
     """Ensure register_builtins has run on the module-level registry."""
     from cliptunnel_mcp import plugins
-    if not plugins._loaded:
+    if not plugins._builtins_loaded:
         if not plugins.registry.op_names():
             plugins.register_builtins(plugins.registry)
-        plugins._loaded = True
+        plugins._builtins_loaded = True
 
 
 def dispatch(payload: str) -> tuple[str, bool]:
