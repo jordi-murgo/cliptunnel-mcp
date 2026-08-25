@@ -444,7 +444,7 @@ class Controller:
         sending a ping. Channel-level keepalive (WS ping/pong, SSE) is
         handled by each transport independently.
         """
-        _DEAD_IDLE = 420.0     # 3.5x default heartbeat (120s + 60s margin)
+        _DEAD_IDLE = 420.0     # 3.5x default heartbeat (120s * 3.5 = 420s)
         _LOOP_INTERVAL = 10.0
 
         while self._running:

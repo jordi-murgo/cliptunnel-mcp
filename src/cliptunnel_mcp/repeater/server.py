@@ -59,6 +59,13 @@ def make_handler(state: RepeaterState) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._check_auth():
+                # Drain the request body so the socket buffer is empty before
+                # we send the 401.  Without this, Windows aborts the connection
+                # (WinError 10053) when the handler returns with unread data,
+                # and the client sees ConnectionAbortedError instead of 401.
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
                 self._send_unauthorized()
                 return
 
