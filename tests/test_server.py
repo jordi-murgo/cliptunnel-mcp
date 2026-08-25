@@ -490,6 +490,51 @@ class TestRemoteInstallInstructionsWebSocket(ServerTestCase):
                       "CLIPTUNNEL_WS_TOKEN", "CLIPTUNNEL_AES_KEY"):
                 os.environ.pop(k, None)
 
+class TestRegistryInstallInstructions(ServerTestCase):
+    """T6: remote_install_instructions uses registry.get_install_instructions."""
+
+    def test_registry_uses_registered_emitter_for_known_transport(self):
+        """Registering a custom emitter in registry makes remote_install_instructions call it."""
+        from cliptunnel_mcp.plugins import registry
+
+        def custom_emitter(cfg_dict):
+            return json.dumps({"transport": "custom", "custom_field": "yes"})
+
+        registry._install_instructions["custom-transport"] = custom_emitter
+        old = os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "custom-transport"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "custom")
+            self.assertEqual(data["custom_field"], "yes")
+        finally:
+            if old is not None:
+                os.environ["CLIPTUNNEL_TRANSPORT"] = old
+            else:
+                os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+            registry._install_instructions.pop("custom-transport", None)
+
+    def test_unknown_transport_falls_back_to_clipboard(self):
+        """Unknown transport falls back to clipboard emitter from registry."""
+        old = os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+        os.environ["CLIPTUNNEL_TRANSPORT"] = "totally-unknown-xyz"
+        try:
+            result = self.call("remote_install_instructions")
+            data = json.loads(result)
+            self.assertEqual(data["transport"], "clipboard")
+        finally:
+            if old is not None:
+                os.environ["CLIPTUNNEL_TRANSPORT"] = old
+            else:
+                os.environ.pop("CLIPTUNNEL_TRANSPORT", None)
+
+    def test_all_four_builtin_transports_use_registry(self):
+        """All 4 builtin transports resolve via registry, not hardcoded if/elif."""
+        from cliptunnel_mcp.plugins import registry
+        for t in ("clipboard", "https", "firebase", "websocket"):
+            self.assertIsNotNone(registry._install_instructions.get(t))
+
     def test_existing_https_branch_unchanged(self):
         """HTTPS transport still works after adding WebSocket branch."""
         os.environ["CLIPTUNNEL_TRANSPORT"] = "https"
@@ -503,6 +548,42 @@ class TestRemoteInstallInstructionsWebSocket(ServerTestCase):
             for k in ("CLIPTUNNEL_TRANSPORT", "CLIPTUNNEL_REPEATER_URL",
                       "CLIPTUNNEL_REPEATER_TOKEN"):
                 os.environ.pop(k, None)
+
+class TestRegistryToolsRegistration(ServerTestCase):
+    """T5: create_server() registers plugin tools from registry."""
+
+    def test_plugin_tool_appears_in_server(self):
+        """A ToolSpec registered in registry must appear in the FastMCP server."""
+        from cliptunnel_mcp.plugins import registry, ToolSpec, register_builtins
+        if not registry.tool_names():
+            register_builtins(registry)
+
+        # Register a temporary plugin tool
+        def plugin_handler(**kwargs):
+            return "plugin-result"
+
+        spec = ToolSpec(
+            name="test_plugin_tool",
+            description="A test plugin tool",
+            input_schema={"type": "object", "properties": {}},
+            handler=plugin_handler,
+        )
+        registry._tools["test_plugin_tool"] = spec
+        try:
+            mcp = self.server.create_server()
+            tools = asyncio.run(mcp.list_tools())
+            names = {tool.name for tool in tools}
+            self.assertIn("test_plugin_tool", names)
+        finally:
+            registry._tools.pop("test_plugin_tool", None)
+
+    def test_builtin_tools_still_registered(self):
+        """Built-in tools must still be present after registry integration."""
+        tools = asyncio.run(self.mcp.list_tools())
+        names = {tool.name for tool in tools}
+        for expected in ("remote_shell", "remote_sysinfo",
+                         "remote_install_instructions"):
+            self.assertIn(expected, names)
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import asyncio
 import json
 import logging
 import os
@@ -74,6 +75,14 @@ def _get_controller() -> Controller | None:
     with _controller_lock:
         return _controller
 
+
+def _ensure_registry_loaded() -> None:
+    """Ensure register_builtins has run on the module-level registry."""
+    from cliptunnel_mcp import plugins
+    if not plugins._loaded:
+        if not plugins.registry.tool_names():
+            plugins.register_builtins(plugins.registry)
+        plugins._loaded = True
 def _capture_client_info(ctx) -> None:
     """Extract client info from the MCP request context and update the controller.
 
@@ -878,118 +887,35 @@ def create_server():
         WARNING: Output contains bearer tokens and AES keys. Do not log
         or expose this output beyond the operator.
         """
+        _ensure_registry_loaded()
+        from cliptunnel_mcp.plugins import registry
+
         transport = config.get_env("CLIPTUNNEL_TRANSPORT", "clipboard").strip().lower()
 
-        if transport == "https":
-            repeater_url = config.get_env("CLIPTUNNEL_REPEATER_URL", "")
-            agent_token = config.get_env("CLIPTUNNEL_REPEATER_TOKEN", "")
-            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
+        try:
+            emitter = registry.get_install_instructions(transport)
+        except KeyError:
+            emitter = registry.get_install_instructions("clipboard")
 
-            env_vars = {
-                "CLIPTUNNEL_TRANSPORT": "https",
-                "CLIPTUNNEL_REPEATER_URL": repeater_url,
-                "CLIPTUNNEL_REPEATER_TOKEN": agent_token,
-            }
+        return emitter({})
 
-            prefix_parts = [
-                "CLIPTUNNEL_TRANSPORT=https",
-                f"CLIPTUNNEL_REPEATER_URL={shlex.quote(repeater_url)}",
-                f"CLIPTUNNEL_REPEATER_TOKEN={shlex.quote(agent_token)}",
-            ]
-            pip_command = "pip install cliptunnel-mcp"
+    # ── Register plugin tools from registry ──────────────────────────────
+    _ensure_registry_loaded()
+    from cliptunnel_mcp.plugins import registry as _registry
 
-            result: dict = {
-                "transport": "https",
-                "repeater_url": repeater_url,
-                "agent_token": agent_token,
-                "env_vars": env_vars,
-                "pip_command": pip_command,
-            }
+    # Collect names of tools already registered via @mcp.tool() decorators
+    _static_tool_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
 
-            if aes_key_raw:
-                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
-                result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
+    # Register any registry tools not already statically registered
+    for tool_name, spec in _registry.tools():
+        if tool_name in _static_tool_names:
+            continue
+        mcp.add_tool(
+            spec.handler,
+            name=tool_name,
+            description=spec.description,
+        )
 
-            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
-            result["agent_command"] = agent_command
-            return json.dumps(result)
-
-        if transport == "firebase":
-            firebase_url = config.get_env("CLIPTUNNEL_FIREBASE_URL", "")
-            firebase_token = config.get_env("CLIPTUNNEL_FIREBASE_TOKEN", "")
-            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
-
-            env_vars = {
-                "CLIPTUNNEL_TRANSPORT": "firebase",
-                "CLIPTUNNEL_FIREBASE_URL": firebase_url,
-                "CLIPTUNNEL_FIREBASE_TOKEN": firebase_token,
-            }
-
-            prefix_parts = [
-                "CLIPTUNNEL_TRANSPORT=firebase",
-                f"CLIPTUNNEL_FIREBASE_URL={shlex.quote(firebase_url)}",
-                f"CLIPTUNNEL_FIREBASE_TOKEN={shlex.quote(firebase_token)}",
-            ]
-            pip_command = "pip install cliptunnel-mcp"
-
-            result = {
-                "transport": "firebase",
-                "firebase_url": firebase_url,
-                "firebase_token": firebase_token,
-                "env_vars": env_vars,
-                "pip_command": pip_command,
-            }
-
-            if aes_key_raw:
-                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
-                result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
-
-            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
-            result["agent_command"] = agent_command
-        if transport == "websocket":
-            ws_url = config.get_env("CLIPTUNNEL_WS_URL", "")
-            agent_token = config.get_env("CLIPTUNNEL_WS_TOKEN", "")
-            aes_key_raw = config.get_env("CLIPTUNNEL_AES_KEY")
-
-            env_vars = {
-                "CLIPTUNNEL_TRANSPORT": "websocket",
-                "CLIPTUNNEL_WS_URL": ws_url,
-                "CLIPTUNNEL_WS_TOKEN": agent_token,
-            }
-
-            prefix_parts = [
-                "CLIPTUNNEL_TRANSPORT=websocket",
-                f"CLIPTUNNEL_WS_URL={shlex.quote(ws_url)}",
-                f"CLIPTUNNEL_WS_TOKEN={shlex.quote(agent_token)}",
-            ]
-            pip_command = "pip install cliptunnel-mcp"
-
-            result: dict = {
-                "transport": "websocket",
-                "ws_url": ws_url,
-                "agent_token": agent_token,
-                "env_vars": env_vars,
-                "pip_command": pip_command,
-            }
-
-            if aes_key_raw:
-                env_vars["CLIPTUNNEL_AES_KEY"] = aes_key_raw
-                result["aes_key"] = aes_key_raw
-                prefix_parts.append(f"CLIPTUNNEL_AES_KEY={shlex.quote(aes_key_raw)}")
-
-            agent_command = " ".join(prefix_parts) + " cliptunnel-agent"
-            result["agent_command"] = agent_command
-            return json.dumps(result)
-        # clipboard (default)
-        result = {
-            "transport": "clipboard",
-            "env_vars": {},
-            "pip_command": "pip install cliptunnel-mcp",
-            "agent_command": "cliptunnel-agent",
-        }
-        return json.dumps(result)
     return mcp
 
 
@@ -1025,6 +951,9 @@ def main() -> None:
     # Apply the --config override before anything resolves settings.
     config.set_config_path(args.config)
 
+    # Load external plugins (entry points + local dir) after builtins.
+    from cliptunnel_mcp.plugins import load_plugins
+    load_plugins()
     from cliptunnel_mcp.transport_factory import build_transport
 
     transport = build_transport()

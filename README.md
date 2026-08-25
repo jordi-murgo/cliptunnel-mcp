@@ -766,6 +766,11 @@ pip install cliptunnel-mcp          # core + clipboard transport + AES encryptio
 pip install cliptunnel-mcp[server]  # + MCP server (mcp>=1.2,<2)
 ```
 
+
+## Plugins
+
+cliptunnel-mcp supports external plugins that add new transports, agent ops, and MCP controller tools without modifying core code. Plugins are discovered via pip entry points (`cliptunnel_mcp.plugins` group) and a local plugin directory (`~/.cliptunnel/plugins/`). See [docs/plugins.md](docs/plugins.md) for the full plugin author guide.
+
 ## License
 
 MIT — see [LICENSE](https://github.com/jordi-murgo/cliptunnel-mcp/blob/main/LICENSE).

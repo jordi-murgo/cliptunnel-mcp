@@ -161,7 +161,12 @@ def get_env(
 
     mapping = ENV_TO_FILE.get(name)
     if mapping is None:
-        return default
+        # T7: check plugin-registered config sections via registry (lazy import
+        # to avoid circular dependency: plugins.py imports config at runtime).
+        from .plugins import registry as _registry
+        mapping = _registry.get_config_env_mapping(name)
+        if mapping is None:
+            return default
 
     sections, key = mapping
     node: object = load_config(config_path)

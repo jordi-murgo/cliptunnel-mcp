@@ -543,6 +543,9 @@ def main() -> None:
 
     # Apply the --config override before anything resolves settings.
     config.set_config_path(args.config)
+    # Load external plugins (entry points + local dir) after builtins.
+    from cliptunnel_mcp.plugins import load_plugins
+    load_plugins()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
