@@ -23,6 +23,15 @@ import subprocess
 
 # ── dispatch ────────────────────────────────────────────────────────────────
 
+def _ensure_loaded() -> None:
+    """Ensure register_builtins has run on the module-level registry."""
+    from cliptunnel_mcp import plugins
+    if not plugins._loaded:
+        if not plugins.registry.op_names():
+            plugins.register_builtins(plugins.registry)
+        plugins._loaded = True
+
+
 def dispatch(payload: str) -> tuple[str, bool]:
     """Parse *payload* as JSON and dispatch to the matching handler.
 
@@ -41,24 +50,12 @@ def dispatch(payload: str) -> tuple[str, bool]:
     if not op:
         return ("missing op field", True)
 
-    handlers = {
-        "shell": op_shell,
-        "fs.read": op_fs_read,
-        "fs.write": op_fs_write,
-        "fs.list": op_fs_list,
-        "fs.delete": op_fs_delete,
-        "fs.replace": op_fs_replace,
-        "fs.search": op_fs_search,
-        "fs.find": op_fs_find,
-        "fs.bin_read": op_fs_bin_read,
-        "fs.bin_write": op_fs_bin_write,
-        "sysinfo": op_sysinfo,
-        "register": op_sysinfo,
-        "agent": op_agent,
-    }
+    _ensure_loaded()
+    from cliptunnel_mcp.plugins import registry
 
-    handler = handlers.get(op)
-    if handler is None:
+    try:
+        handler = registry.get_op_handler(op)
+    except KeyError:
         return (f"unknown op: {op}", True)
 
     return handler(req)

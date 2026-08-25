@@ -329,5 +329,43 @@ class TestRegister(unittest.TestCase):
         self.assertEqual(set(reg_data.keys()), set(sys_data.keys()))
 
 
+
+class TestRegistryDispatch(unittest.TestCase):
+    """T4: dispatch() uses registry.get_op_handler for op lookup."""
+
+    def test_dispatch_uses_registry_for_lookup(self):
+        """Monkey-patch a new op into registry; dispatch must call it."""
+        from cliptunnel_mcp import plugins
+        if not plugins._loaded:
+            plugins.register_builtins(plugins.registry)
+            plugins._loaded = True
+
+        called = []
+        def custom_handler(req):
+            called.append(req)
+            return ("custom-result", False)
+
+        # Register a temporary op (collision-free name)
+        plugins.registry._ops["test.custom"] = custom_handler
+        try:
+            out, err = dispatch(json.dumps({"op": "test.custom", "data": 42}))
+            self.assertFalse(err)
+            self.assertEqual(out, "custom-result")
+            self.assertEqual(len(called), 1)
+            self.assertEqual(called[0]["data"], 42)
+        finally:
+            plugins.registry._ops.pop("test.custom", None)
+
+    def test_unknown_op_still_exact_error_string(self):
+        out, err = dispatch(json.dumps({"op": "truly.nonexistent"}))
+        self.assertTrue(err)
+        self.assertEqual(out, "unknown op: truly.nonexistent")
+
+    def test_all_existing_ops_still_work(self):
+        """All built-in ops must still dispatch correctly."""
+        out, err = dispatch(json.dumps({"op": "shell", "cmd": "echo ok"}))
+        self.assertFalse(err)
+        data = json.loads(out)
+        self.assertEqual(data["stdout"].strip(), "ok")
 if __name__ == "__main__":
     unittest.main()
