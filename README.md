@@ -107,12 +107,11 @@ sequenceDiagram
     participant A as Agent
 
     Note over A: every CLIPTUNNEL_HEARTBEAT_SECS (default 120s)<br/>+ random jitter 0–15s
-    A-->>C: CT3|R...|C...|0|R|<sysinfo> (registration re-send)
-    C-->>A: CT3|C...|R...|seq|A| (ACK)
-    Note over C: registry upsert + last_seen refreshed
+    A-->>C: CT3|R...|*|0|R|<sysinfo> (broadcast registration)
+    Note over C: registry upsert + last_seen refreshed<br/>(no ACK — broadcast is fire-and-forget)
 ```
 
-Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` with `seq=0` carrying `sysinfo`) to every known controller on a configurable interval plus jitter. The jitter prevents multiple agents sharing a channel from synchronizing their writes. A lost heartbeat is harmless — the next one arrives. The controller's existing registration upsert path consumes it with no protocol or controller changes.
+Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` with `seq=0` carrying `sysinfo`) as a single broadcast to `*` on a configurable interval plus jitter, so every known controller on the shared channel receives it. The jitter prevents multiple agents sharing a channel from synchronizing their writes. A lost heartbeat is harmless — the next one arrives. The controller's existing registration upsert path consumes it with no protocol or controller changes, and no ACK is sent for broadcast registrations.
 
 | Setting | Default | Effect |
 |---------|---------|--------|
