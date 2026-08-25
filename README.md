@@ -112,7 +112,7 @@ Each Agent runs a daemon thread that re-sends its registration (a `RESPONSE` wit
 | Setting | Default | Effect |
 |---------|---------|--------|
 | `CLIPTUNNEL_HEARTBEAT_SECS` env var | `120` | Interval in seconds. `<= 0` disables the heartbeat. |
-| `Agent(heartbeat_secs=...)` | `None` (resolves env, then default) | Programmatic override of the env var. |
+| `Agent(heartbeat_secs=...)` | `None` (resolves env var, then config file `[heartbeat] interval_secs`, then default) | Programmatic override of the env var. |
 
 ### Keepalive
 
@@ -221,7 +221,7 @@ agent = Agent(transport=build_transport(), handler=dispatch)
 
 ## MCP tools
 
-The server exposes **27 tools** over stdio. All tools accept an optional `remote_id` parameter to target a specific remote. If omitted, the Controller picks the first alive remote.
+The server exposes **27 tools** over stdio. Most tools accept an optional `remote_id` parameter to target a specific remote; if omitted, the Controller picks the first alive remote. The exceptions are `remote_shell_result` (targets a job by `job_id`), `remote_connections`, `remote_discovery`, and `remote_install_instructions`, which are global or job-scoped and do not take `remote_id`.
 
 ### Shell & filesystem
 
@@ -285,7 +285,7 @@ The `dispatch` handler supports these operations:
 | `fs.write` | `path`, `content` | `wrote N bytes to PATH` |
 | `fs.list` | `path` | JSON: `[{name, size, is_dir}]` |
 | `fs.delete` | `path` | `deleted PATH` |
-| `fs.replace` | `path`, `old`, `new` | `replaced 1 occurrence` (exact-once) |
+| `fs.replace` | `path`, `old`, `new` | `replaced 1 occurrence in {path}` (exact-once) |
 | `fs.search` | `path`, `pattern` | JSON: `[{line, content}]` (regex) |
 | `fs.find` | `path`, `pattern` | JSON: `[PATH, ...]` (glob) |
 | `fs.bin_read` | `path` | JSON: `{path, size, b64}` |
@@ -342,7 +342,7 @@ Constructor parameters: `transport` (required), `handler` (required), `poll_inte
 
 | Method | Description |
 |--------|-------------|
-| `read() -> str \| None` | Return the current clipboard value (cached). |
+| `read() -> str` | Return the current clipboard value (cached, never `None` — empty string when the clipboard is empty). |
 | `write(text: str)` | Write to the clipboard as a self-write. |
 | `restore_user_clipboard() -> bool` | Guarded restore of the backed-up user content; `True` on success, `False` if the slot was touched by another writer or no backup exists. |
 
@@ -448,7 +448,7 @@ uv venv && source .venv/bin/activate
 # Install in development mode
 uv pip install -e . pytest
 
-# Run the test suite (512 tests with both pytest and unittest)
+# Run the test suite (498 tests with both pytest and unittest)
 python -m pytest -q
 # or
 python -m unittest discover -s tests -t .
@@ -647,7 +647,7 @@ The repeater has three endpoints, all requiring `Authorization: Bearer <token>`:
 |----------|--------|-------------|
 | `/slot` | `POST` | Write a value to the slot. Returns `{"revision": N}`. |
 | `/slot` | `GET` | Return the current slot snapshot `{"value": "...", "revision": N}`. |
-| `/slot/events` | `GET` | SSE stream of write events. Each write pushes `event: write\ndata: <value>\n\n`. |
+| `/slot/events` | `GET` | SSE stream of write events. Each write pushes `event: write\ndata: {"revision": N, "value": "..."}\n\n`. |
 
 The repeater state is ephemeral (in-memory). On restart, peers self-heal via the heartbeat mechanism. No database, no disk.
 
