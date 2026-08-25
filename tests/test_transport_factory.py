@@ -488,5 +488,42 @@ class TestWebSocket(unittest.TestCase):
         finally:
             env.restore()
 
+class TestRegistryLookup(unittest.TestCase):
+    """T3: build_transport() uses registry for transport lookup."""
+
+    def test_unknown_transport_lists_registry_names(self) -> None:
+        """Unknown transport error must list registry.transport_names()."""
+        env = _EnvGuard()
+        try:
+            env.set("CLIPTUNNEL_TRANSPORT", "carrier-pigeon")
+            with self.assertRaises(ValueError) as ctx:
+                build_transport()
+            msg = str(ctx.exception)
+            self.assertIn("not supported", msg)
+            # Registry has clipboard, https, firebase, websocket
+            for name in ("clipboard", "https", "firebase", "websocket"):
+                self.assertIn(name, msg)
+        finally:
+            env.restore()
+
+    def test_registry_loaded_on_build(self) -> None:
+        """build_transport() ensures register_builtins has run."""
+        from cliptunnel_mcp import plugins
+        # Reset _loaded flag to verify build_transport triggers load
+        old_loaded = plugins._loaded
+        plugins._loaded = False
+        try:
+            env = _EnvGuard()
+            try:
+                env.set("CLIPTUNNEL_TRANSPORT", "carrier-pigeon")
+                with self.assertRaises(ValueError):
+                    build_transport()
+                # After calling build_transport, _loaded should be True
+                self.assertTrue(plugins._loaded)
+            finally:
+                env.restore()
+        finally:
+            plugins._loaded = old_loaded
+
 if __name__ == "__main__":
     unittest.main()
