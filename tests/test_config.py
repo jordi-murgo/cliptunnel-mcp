@@ -37,6 +37,8 @@ _ALL_ENV_VARS = [
     "CLIPTUNNEL_AES_KEY",
     "CLIPTUNNEL_HEARTBEAT_SECS",
     "CLIPTUNNEL_CONFIG",
+    "CLIPTUNNEL_BLOCK_SIZE",
+    "CLIPTUNNEL_TRANSFER_TIMEOUT_SECS",
 ]
 
 
@@ -351,6 +353,43 @@ class TestPluginEnvMappingFallback(ConfigTestCase):
         # If there were a circular import, this would raise
         mod = importlib.import_module("cliptunnel_mcp.config")
         self.assertTrue(hasattr(mod, "get_env"))
+
+
+class TestTransferConfig(ConfigTestCase):
+    """Config entries for block-based file transfer: CLIPTUNNEL_BLOCK_SIZE and CLIPTUNNEL_TRANSFER_TIMEOUT_SECS."""
+
+    def test_block_size_default_when_neither_set(self) -> None:
+        """Default 65536 when neither env nor TOML set."""
+        self.assertEqual(config.get_env("CLIPTUNNEL_BLOCK_SIZE", "65536"), "65536")
+
+    def test_block_size_env_overrides_toml(self) -> None:
+        """Env var CLIPTUNNEL_BLOCK_SIZE=131072 overrides TOML."""
+        toml = '[transfer]\nblock_size = 32768\n'
+        path = self.write_config(toml)
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+        os.environ["CLIPTUNNEL_BLOCK_SIZE"] = "131072"
+        self.assertEqual(config.get_env("CLIPTUNNEL_BLOCK_SIZE"), "131072")
+
+    def test_block_size_toml_when_env_unset(self) -> None:
+        """TOML [transfer] block_size=32768 used when env unset."""
+        toml = '[transfer]\nblock_size = 32768\n'
+        path = self.write_config(toml)
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+        self.assertEqual(config.get_env("CLIPTUNNEL_BLOCK_SIZE"), "32768")
+
+    def test_transfer_timeout_env(self) -> None:
+        """CLIPTUNNEL_TRANSFER_TIMEOUT_SECS=30 via env."""
+        os.environ["CLIPTUNNEL_TRANSFER_TIMEOUT_SECS"] = "30"
+        self.assertEqual(config.get_env("CLIPTUNNEL_TRANSFER_TIMEOUT_SECS"), "30")
+
+    def test_transfer_timeout_env_overrides_toml(self) -> None:
+        """Env precedence over TOML for timeout."""
+        toml = '[transfer]\ntimeout_secs = 120\n'
+        path = self.write_config(toml)
+        os.environ["CLIPTUNNEL_CONFIG"] = path
+        os.environ["CLIPTUNNEL_TRANSFER_TIMEOUT_SECS"] = "30"
+        self.assertEqual(config.get_env("CLIPTUNNEL_TRANSFER_TIMEOUT_SECS"), "30")
+
 
 if __name__ == "__main__":
     unittest.main()

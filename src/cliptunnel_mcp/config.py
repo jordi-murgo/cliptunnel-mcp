@@ -31,6 +31,7 @@ A missing file is not an error (empty settings). Malformed TOML raises
 :class:`ValueError`. If the file's permissions allow group/other read,
 a :func:`logging.warning` recommends ``chmod 600`` (never fatal).
 """
+
 from __future__ import annotations
 
 import logging
@@ -52,7 +53,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cliptunnel", "config.toml")
+DEFAULT_CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".cliptunnel", "config.toml"
+)
 
 # Environment variable name -> ([section], key) in the TOML document.
 ENV_TO_FILE: dict[str, tuple[tuple[str, ...], str]] = {
@@ -65,6 +68,11 @@ ENV_TO_FILE: dict[str, tuple[tuple[str, ...], str]] = {
     "CLIPTUNNEL_WS_TOKEN": (("transport",), "ws_token"),
     "CLIPTUNNEL_AES_KEY": (("encryption",), "aes_key"),
     "CLIPTUNNEL_HEARTBEAT_SECS": (("heartbeat",), "interval_secs"),
+    "CLIPTUNNEL_COPILOT_TOKEN_URL": (("copilot",), "token_url"),
+    "CLIPTUNNEL_COPILOT_CHAT_URL": (("copilot",), "chat_url"),
+    "CLIPTUNNEL_COPILOT_RESPONSES_URL": (("copilot",), "responses_url"),
+    "CLIPTUNNEL_BLOCK_SIZE": (("transfer",), "block_size"),
+    "CLIPTUNNEL_TRANSFER_TIMEOUT_SECS": (("transfer",), "timeout_secs"),
 }
 
 # Explicit --config override set by the CLI entry points. Beats CLIPTUNNEL_CONFIG.
@@ -164,6 +172,7 @@ def get_env(
         # T7: check plugin-registered config sections via registry (lazy import
         # to avoid circular dependency: plugins.py imports config at runtime).
         from .plugins import registry as _registry
+
         mapping = _registry.get_config_env_mapping(name)
         if mapping is None:
             return default
