@@ -336,8 +336,62 @@ class TestBuiltinOpCount(unittest.TestCase):
             "shell", "fs.read", "fs.write", "fs.list", "fs.delete",
             "fs.replace", "fs.search", "fs.find", "fs.bin_read",
             "fs.bin_write", "sysinfo", "register", "agent",
+            "file.transfer.start", "file.transfer.block",
+            "file.transfer.end", "file.transfer.cancel",
         }
         self.assertEqual(set(reg.op_names()), expected_ops)
+
+
+class TestTransferToolSpecs(unittest.TestCase):
+    """Tests for the four new file-transfer ToolSpec entries."""
+
+    def setUp(self):
+        self.reg = ExtensionRegistry()
+        register_builtins(self.reg)
+
+    def test_transfer_tools_registered(self):
+        names = self.reg.tool_names()
+        for tool in (
+            "remote_file_transfer_start",
+            "remote_file_transfer_block",
+            "remote_file_transfer_end",
+            "remote_file_transfer_cancel",
+        ):
+            self.assertIn(tool, names)
+
+    def test_transfer_start_tool_spec_fields(self):
+        spec = self.reg.get_tool("remote_file_transfer_start")
+        self.assertEqual(spec.name, "remote_file_transfer_start")
+        self.assertTrue(spec.description)
+        self.assertIn("filename", spec.input_schema["properties"])
+        self.assertIn("direction", spec.input_schema["properties"])
+        self.assertIn("size", spec.input_schema["properties"])
+        self.assertIn("block_size", spec.input_schema["properties"])
+        self.assertIn("checksum", spec.input_schema["properties"])
+        self.assertTrue(callable(spec.handler))
+
+    def test_transfer_block_tool_spec_fields(self):
+        spec = self.reg.get_tool("remote_file_transfer_block")
+        self.assertEqual(spec.name, "remote_file_transfer_block")
+        self.assertIn("transfer_id", spec.input_schema["properties"])
+        self.assertIn("block_num", spec.input_schema["properties"])
+        self.assertTrue(callable(spec.handler))
+
+    def test_transfer_end_tool_spec_fields(self):
+        spec = self.reg.get_tool("remote_file_transfer_end")
+        self.assertEqual(spec.name, "remote_file_transfer_end")
+        self.assertIn("transfer_id", spec.input_schema["properties"])
+        self.assertTrue(callable(spec.handler))
+
+    def test_transfer_cancel_tool_spec_fields(self):
+        spec = self.reg.get_tool("remote_file_transfer_cancel")
+        self.assertEqual(spec.name, "remote_file_transfer_cancel")
+        self.assertIn("transfer_id", spec.input_schema["properties"])
+        self.assertTrue(callable(spec.handler))
+
+    def test_transfer_tool_count_matches_expected(self):
+        from tests.test_server import EXPECTED_TOOLS
+        self.assertEqual(set(self.reg.tool_names()), EXPECTED_TOOLS)
 
 
 

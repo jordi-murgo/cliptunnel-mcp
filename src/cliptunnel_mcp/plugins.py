@@ -610,13 +610,14 @@ def _register_server_tools(reg: ExtensionRegistry, server) -> None:
              "required": ["local_path", "remote_path"],
          }),
         ("remote_download", server.download,
-         "Download a binary file from the remote machine to the local machine via base64 over the clipboard tunnel.",
+         "Download a binary file from the remote machine to the local machine via block transfer protocol.",
          {
              "type": "object",
              "properties": {
-                 "remote_path": {"type": "string"},
-                 "local_path": {"type": "string"},
-                 "remote_id": {"type": ["string", "null"]},
+                "remote_path": {"type": "string"},
+                "local_path": {"type": "string"},
+                "remote_id": {"type": ["string", "null"]},
+                "checksum": {"type": ["string", "null"]},
              },
              "required": ["remote_path", "local_path"],
          }),
@@ -748,6 +749,52 @@ def _register_server_tools(reg: ExtensionRegistry, server) -> None:
              "type": "object",
              "properties": {},
              "required": [],
+         }),
+        ("remote_file_transfer_start", server.file_transfer_start,
+         "Start a block-based file transfer session on the remote machine.",
+         {
+             "type": "object",
+             "properties": {
+                 "filename": {"type": "string"},
+                 "direction": {"type": "string"},
+                 "size": {"type": "integer"},
+                 "block_size": {"type": "integer"},
+                 "checksum": {"type": "string"},
+                 "remote_id": {"type": ["string", "null"]},
+             },
+             "required": ["filename", "direction", "size", "block_size", "checksum"],
+         }),
+        ("remote_file_transfer_block", server.file_transfer_block,
+         "Send or receive a single block in an active transfer session.",
+         {
+             "type": "object",
+             "properties": {
+                 "transfer_id": {"type": "string"},
+                 "block_num": {"type": "integer"},
+                 "data": {"type": ["string", "null"]},
+                 "remote_id": {"type": ["string", "null"]},
+             },
+             "required": ["transfer_id", "block_num"],
+         }),
+        ("remote_file_transfer_end", server.file_transfer_end,
+         "Finalize a transfer: verify checksum and commit the file.",
+         {
+             "type": "object",
+             "properties": {
+                 "transfer_id": {"type": "string"},
+                 "remote_id": {"type": ["string", "null"]},
+             },
+             "required": ["transfer_id"],
+         }),
+        ("remote_file_transfer_cancel", server.file_transfer_cancel,
+         "Cancel an active transfer and clean up temp files.",
+         {
+             "type": "object",
+             "properties": {
+                 "transfer_id": {"type": "string"},
+                 "remote_id": {"type": ["string", "null"]},
+             },
+             "required": ["transfer_id"],
          }),
     ]
 

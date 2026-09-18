@@ -206,7 +206,7 @@ Chain strategy: stacked-to-main
 
 ## Phase 3: Integration — MCP Tools and Upload/Download Refactor
 
-- [ ] 3.1 **RED**: Write failing tests in `tests/test_server.py` for the four new MCP tools. New test class `TestTransferTools(ServerTestCase)`:
+- [x] 3.1 **RED**: Write failing tests in `tests/test_server.py` for the four new MCP tools. New test class `TestTransferTools(ServerTestCase)`:
   - (a) `test_remote_file_transfer_start` — `call_json("remote_file_transfer_start", filename=remote_path, direction="upload", size=1024, block_size=65536, checksum="abc")`, assert response has `transfer_id` and `total_blocks`
   - (b) `test_remote_file_transfer_block` — start a session, then `call_json("remote_file_transfer_block", transfer_id=tid, block_num=0, data=base64.b64encode(b"data").decode())`, assert `block_num`, `status:"ok"`
   - (c) `test_remote_file_transfer_end` — start + send all blocks + `call_json("remote_file_transfer_end", transfer_id=tid)`, assert `verified:true`, `path`, `size`
@@ -217,7 +217,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.12 (ops registered and working)
   - Verify: `python -m unittest tests.test_server.TestTransferTools -v` (5 tests fail)
 
-- [ ] 3.2 **GREEN**: Add four controller-side helper functions in `src/cliptunnel_mcp/server.py` (following the `fs_bin_read`/`fs_bin_write` pattern):
+- [x] 3.2 **GREEN**: Add four controller-side helper functions in `src/cliptunnel_mcp/server.py` (following the `fs_bin_read`/`fs_bin_write` pattern):
   - `file_transfer_start(filename, direction, size, block_size, checksum, remote_id=None) -> str | None` — calls `controller.send_command_sync(json.dumps({"op":"file.transfer.start",...}))`
   - `file_transfer_block(transfer_id, block_num, data=None, remote_id=None) -> str | None` — calls `controller.send_command_sync(json.dumps({"op":"file.transfer.block",...}))` (include `data` only if not None)
   - `file_transfer_end(transfer_id, remote_id=None) -> str | None` — calls `controller.send_command_sync(json.dumps({"op":"file.transfer.end",...}))`
@@ -229,7 +229,7 @@ Chain strategy: stacked-to-main
   - Depends on: 3.1
   - Verify: `python -m unittest tests.test_server.TestTransferTools -v` (all pass)
 
-- [ ] 3.3 **RED**: Write failing tests in `tests/test_server.py` for refactored `upload()` and `download()`. New test class `TestBlockUploadDownload(ServerTestCase)`:
+- [x] 3.3 **RED**: Write failing tests in `tests/test_server.py` for refactored `upload()` and `download()`. New test class `TestBlockUploadDownload(ServerTestCase)`:
   - (a) `test_upload_multi_block` — create a 200KB local file (block_size default 64KB → 4 blocks), `call("remote_upload", local_path=local, remote_path=remote)`, assert response contains `"verified":true` or `"status":"ok"`; verify remote file exists with correct content; verify SHA-256 matches
   - (b) `test_upload_single_block` — create a 32KB file (< 64KB), upload, assert `total_blocks == 1`; verify file content
   - (c) `test_download_multi_block` — create a 200KB remote file (write directly), `call("remote_download", remote_path=remote, local_path=local)`, assert success; verify local file content matches; verify SHA-256
@@ -243,7 +243,7 @@ Chain strategy: stacked-to-main
   - Depends on: 3.2 (MCP tools work for manual orchestration in tests)
   - Verify: `python -m unittest tests.test_server.TestBlockUploadDownload -v` (8 tests fail)
 
-- [ ] 3.4 **GREEN**: Refactor `upload()` in `src/cliptunnel_mcp/server.py` to use the block transfer protocol:
+- [x] 3.4 **GREEN**: Refactor `upload()` in `src/cliptunnel_mcp/server.py` to use the block transfer protocol:
   - Read local file, compute SHA-256 checksum, resolve block_size via `config.get_env("CLIPTUNNEL_BLOCK_SIZE", default="65536")`
   - Call `file_transfer_start(remote_path, "upload", size, block_size, checksum, remote_id)` → parse `transfer_id`, `total_blocks`
   - Loop `range(total_blocks)`: slice `data[offset:offset+block_size]`, base64-encode, call `file_transfer_block(transfer_id, block_num, b64, remote_id)` → parse response; if `is_error` → call `file_transfer_cancel(transfer_id, remote_id)` and return error
@@ -253,7 +253,7 @@ Chain strategy: stacked-to-main
   - Depends on: 3.3
   - Verify: `python -m unittest tests.test_server.TestBlockUploadDownload -v` (upload tests pass)
 
-- [ ] 3.5 **GREEN**: Refactor `download()` in `src/cliptunnel_mcp/server.py` to use the block transfer protocol:
+- [x] 3.5 **GREEN**: Refactor `download()` in `src/cliptunnel_mcp/server.py` to use the block transfer protocol:
   - Caller provides `remote_path` and `local_path`; for v1, the download `size` and `checksum` are discovered by the agent at `file.transfer.start` (agent computes real size via `os.path.getsize()`, returns `total_blocks` from real size; controller's `size` field is a hint, ignored if mismatched). The `checksum` is provided by the MCP caller (v1 design decision).
   - Call `file_transfer_start(remote_path, "download", size=0, block_size, checksum, remote_id)` → parse `transfer_id`, `total_blocks` (from agent's real computation)
   - Loop `range(total_blocks)`: call `file_transfer_block(transfer_id, block_num, data=None, remote_id)` → parse base64 `data` from response; write decoded bytes to local file at correct offset; if `is_error` → cancel and return error
@@ -265,7 +265,7 @@ Chain strategy: stacked-to-main
   - Depends on: 3.4
   - Verify: `python -m unittest tests.test_server.TestBlockUploadDownload -v` (all pass)
 
-- [ ] 3.6 **RED**: Write failing tests in `tests/test_server.py` for MCP tool cancel at any point. New test class `TestTransferCancelMCP(ServerTestCase)`:
+- [x] 3.6 **RED**: Write failing tests in `tests/test_server.py` for MCP tool cancel at any point. New test class `TestTransferCancelMCP(ServerTestCase)`:
   - (a) `test_cancel_after_start_before_blocks` — start a session, immediately cancel via `remote_file_transfer_cancel`, assert `cancelled:true`; subsequent `remote_file_transfer_block` returns error
   - (b) `test_cancel_mid_blocks` — start a session, send 3 blocks, cancel, assert `cancelled:true`; send another block → error "invalid or expired"
   - (c) `test_cancel_after_last_block_before_end` — start, send all blocks, cancel (before end), assert `cancelled:true`; call end → error "invalid or expired"
@@ -274,19 +274,19 @@ Chain strategy: stacked-to-main
   - Depends on: 3.5
   - Verify: `python -m unittest tests.test_server.TestTransferCancelMCP -v` (3 tests — pass or fix)
 
-- [ ] 3.7 **GREEN**: Fix any issues found by 3.6 cancel tests. Ensure `remote_file_transfer_cancel` MCP tool correctly delegates to `file_transfer_cancel` helper and that the agent-side `op_file_transfer_cancel` cleans up at any state. Run: `python -m unittest tests.test_server.TestTransferCancelMCP -v` — all pass.
+- [x] 3.7 **GREEN**: Fix any issues found by 3.6 cancel tests. Ensure `remote_file_transfer_cancel` MCP tool correctly delegates to `file_transfer_cancel` helper and that the agent-side `op_file_transfer_cancel` cleans up at any state. Run: `python -m unittest tests.test_server.TestTransferCancelMCP -v` — all pass.
   - Files: `src/cliptunnel_mcp/server.py` (if fixes needed)
   - Depends on: 3.6
   - Verify: `python -m unittest tests.test_server.TestTransferCancelMCP -v` (all pass)
 
 ## Phase 4: Registration — Plugin Registry and ToolSpec Entries
 
-- [ ] 4.1 **RED**: Write failing tests in `tests/test_plugins.py` for the four new ToolSpec entries. Test that `registry.tool_names()` includes `"remote_file_transfer_start"`, `"remote_file_transfer_block"`, `"remote_file_transfer_end"`, `"remote_file_transfer_cancel"`. Test that each `ToolSpec` has correct `name`, `description`, `input_schema`, and `handler`. Run: `python -m unittest tests.test_plugins -v` — fail (tools not registered in plugins).
+- [x] 4.1 **RED**: Write failing tests in `tests/test_plugins.py` for the four new ToolSpec entries. Test that `registry.tool_names()` includes `"remote_file_transfer_start"`, `"remote_file_transfer_block"`, `"remote_file_transfer_end"`, `"remote_file_transfer_cancel"`. Test that each `ToolSpec` has correct `name`, `description`, `input_schema`, and `handler`. Run: `python -m unittest tests.test_plugins -v` — fail (tools not registered in plugins).
   - Files: `tests/test_plugins.py`
   - Depends on: 3.2 (server helpers exist)
   - Verify: `python -m unittest tests.test_plugins -v` (new tests fail)
 
-- [ ] 4.2 **GREEN**: Add four `ToolSpec` entries to `_register_server_tools()` in `src/cliptunnel_mcp/plugins.py`, following the exact pattern of existing entries (e.g., `remote_fs_bin_read`). Each entry maps the tool name to the server helper function with an appropriate `input_schema`:
+- [x] 4.2 **GREEN**: Add four `ToolSpec` entries to `_register_server_tools()` in `src/cliptunnel_mcp/plugins.py`, following the exact pattern of existing entries (e.g., `remote_fs_bin_read`). Each entry maps the tool name to the server helper function with an appropriate `input_schema`:
   - `("remote_file_transfer_start", server.file_transfer_start, "Start a block-based file transfer session on the remote machine.", {filename, direction, size, block_size, checksum, remote_id})`
   - `("remote_file_transfer_block", server.file_transfer_block, "Send or receive a single block in an active transfer session.", {transfer_id, block_num, data, remote_id})`
   - `("remote_file_transfer_end", server.file_transfer_end, "Finalize a transfer: verify checksum and commit the file.", {transfer_id, remote_id})`

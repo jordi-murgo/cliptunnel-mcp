@@ -31,6 +31,7 @@ import argparse
 import base64
 import concurrent.futures
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -389,27 +390,198 @@ def fs_bin_write(path: str, b64: str, remote_id: str | None = None) -> str | Non
     )
 
 
+def file_transfer_start(filename: str, direction: str, size: int, block_size: int, checksum: str, remote_id: str | None = None) -> str | None:
+    """Start a block-based file transfer session on the remote machine."""
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "file.transfer.start",
+        "direction": direction,
+        "filename": filename,
+        "size": size,
+        "block_size": block_size,
+        "checksum": checksum,
+    }), remote_id=remote_id)
+
+
+def file_transfer_block(transfer_id: str, block_num: int, data: str | None = None, remote_id: str | None = None) -> str | None:
+    """Send or receive a single block in an active transfer session."""
+    controller = _get_controller()
+    if controller is None:
+        return None
+    req: dict = {"op": "file.transfer.block", "transfer_id": transfer_id, "block_num": block_num}
+    if data is not None:
+        req["data"] = data
+    return controller.send_command_sync(json.dumps(req), remote_id=remote_id)
+
+
+def file_transfer_end(transfer_id: str, remote_id: str | None = None) -> str | None:
+    """Finalize a transfer: verify checksum and commit the file."""
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "file.transfer.end",
+        "transfer_id": transfer_id,
+    }), remote_id=remote_id)
+
+
+def file_transfer_cancel(transfer_id: str, remote_id: str | None = None) -> str | None:
+    """Cancel an active transfer and clean up temp files."""
+    controller = _get_controller()
+    if controller is None:
+        return None
+    return controller.send_command_sync(json.dumps({
+        "op": "file.transfer.cancel",
+        "transfer_id": transfer_id,
+    }), remote_id=remote_id)
+
+
+def _resolve_block_size() -> int:
+    """Resolve the block size from config, defaulting to 64KB."""
+    raw = config.get_env("CLIPTUNNEL_BLOCK_SIZE", default="65536")
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return 65536
+
+
 def upload(local_path: str, remote_path: str, remote_id: str | None = None) -> str | None:
-    """Upload a local binary file to the remote machine via base64."""
+    """Upload a local file via the block transfer protocol.
+
+    Splits the local file into blocks, sends them sequentially via
+    file.transfer.start → N × file.transfer.block → file.transfer.end.
+    The agent verifies the checksum and atomically commits the file.
+    """
     with open(local_path, "rb") as f:
         data = f.read()
-    encoded = base64.b64encode(data).decode("ascii")
-    return fs_bin_write(remote_path, encoded, remote_id=remote_id)
+    checksum = hashlib.sha256(data).hexdigest()
+    size = len(data)
+    block_size = _resolve_block_size()
 
-
-def download(remote_path: str, local_path: str, remote_id: str | None = None) -> str | None:
-    """Download a binary file from the remote machine via base64."""
-    response = fs_bin_read(remote_path, remote_id=remote_id)
-    if response is None:
+    # 1. Start
+    start_resp = file_transfer_start(
+        remote_path, "upload", size, block_size, checksum, remote_id=remote_id,
+    )
+    if start_resp is None:
         return None
     try:
-        result = json.loads(response)
-        data = base64.b64decode(result["b64"])
-    except (json.JSONDecodeError, KeyError, Exception) as exc:
-        return f"download failed: {exc}"
+        start = json.loads(start_resp)
+    except json.JSONDecodeError:
+        return start_resp
+    if start.get("is_error"):
+        return start_resp
+    transfer_id = start["transfer_id"]
+    total_blocks = start["total_blocks"]
+
+    # 2. Blocks
+    for block_num in range(total_blocks):
+        offset = block_num * block_size
+        chunk = data[offset:offset + block_size]
+        b64 = base64.b64encode(chunk).decode("ascii")
+        block_resp = file_transfer_block(
+            transfer_id, block_num, data=b64, remote_id=remote_id,
+        )
+        if block_resp is None:
+            file_transfer_cancel(transfer_id, remote_id=remote_id)
+            return json.dumps({"status": "error", "error": "no response from Agent"})
+        try:
+            block = json.loads(block_resp)
+        except json.JSONDecodeError:
+            file_transfer_cancel(transfer_id, remote_id=remote_id)
+            return block_resp
+        if block.get("is_error"):
+            file_transfer_cancel(transfer_id, remote_id=remote_id)
+            return block_resp
+
+    # 3. End
+    end_resp = file_transfer_end(transfer_id, remote_id=remote_id)
+    if end_resp is None:
+        return None
+    try:
+        end = json.loads(end_resp)
+    except json.JSONDecodeError:
+        return end_resp
+    if end.get("is_error"):
+        return end_resp
+    if not end.get("verified", False):
+        return json.dumps({"status": "checksum_failed", "path": remote_path})
+    return json.dumps({
+        "status": "ok", "path": remote_path, "size": size,
+        "verified": True, "total_blocks": total_blocks,
+    })
+
+
+def download(remote_path: str, local_path: str, remote_id: str | None = None, checksum: str | None = None) -> str | None:
+    """Download a remote file via the block transfer protocol.
+
+    The agent computes the real file size at start (controller's ``size``
+    field is a hint). If *checksum* is provided, the controller verifies
+    the assembled local file after all blocks are received.
+    """
+    block_size = _resolve_block_size()
+
+    # 1. Start (direction: download; size=0 as hint — agent computes real size)
+    start_resp = file_transfer_start(
+        remote_path, "download", 0, block_size, checksum or "",
+        remote_id=remote_id,
+    )
+    if start_resp is None:
+        return None
+    try:
+        start = json.loads(start_resp)
+    except json.JSONDecodeError:
+        return start_resp
+    if start.get("is_error"):
+        return start_resp
+    transfer_id = start["transfer_id"]
+    total_blocks = start["total_blocks"]
+
+    # 2. Blocks — read each block, write to local file
     with open(local_path, "wb") as f:
-        f.write(data)
-    return f"downloaded {len(data)} bytes to {local_path}"
+        for block_num in range(total_blocks):
+            block_resp = file_transfer_block(
+                transfer_id, block_num, data=None, remote_id=remote_id,
+            )
+            if block_resp is None:
+                file_transfer_cancel(transfer_id, remote_id=remote_id)
+                return json.dumps({"status": "error", "error": "no response from Agent"})
+            try:
+                block = json.loads(block_resp)
+            except json.JSONDecodeError:
+                file_transfer_cancel(transfer_id, remote_id=remote_id)
+                return block_resp
+            if block.get("is_error"):
+                file_transfer_cancel(transfer_id, remote_id=remote_id)
+                return block_resp
+            chunk = base64.b64decode(block["data"])
+            f.write(chunk)
+
+    # 3. End
+    end_resp = file_transfer_end(transfer_id, remote_id=remote_id)
+    if end_resp is None:
+        return None
+    try:
+        end = json.loads(end_resp)
+    except json.JSONDecodeError:
+        return end_resp
+    if end.get("is_error"):
+        return end_resp
+
+    # 4. Verify local file checksum if provided
+    if checksum is not None:
+        with open(local_path, "rb") as f:
+            local_data = f.read()
+        local_checksum = hashlib.sha256(local_data).hexdigest()
+        if local_checksum != checksum:
+            return json.dumps({"status": "checksum_failed", "path": local_path})
+
+    return json.dumps({
+        "status": "ok", "path": local_path,
+        "size": end.get("size", 0),
+        "verified": True, "total_blocks": total_blocks,
+    })
 
 # ── Agent helpers (Controller-side, before create_server) ────────────────
 
@@ -706,10 +878,60 @@ def create_server():
         return _send(upload, local_path, remote_path, remote_id=remote_id)
 
     @mcp.tool()
-    def remote_download(remote_path: str, local_path: str, remote_id: str | None = None) -> str:
+    def remote_download(remote_path: str, local_path: str, remote_id: str | None = None, checksum: str | None = None) -> str:
         """Download a binary file from the remote machine to the local
-        machine via base64 over the clipboard tunnel."""
-        return _send(download, remote_path, local_path, remote_id=remote_id)
+        machine via block transfer protocol.
+
+        If *checksum* is provided, the downloaded file is verified against it.
+        """
+        return _send(download, remote_path, local_path, remote_id=remote_id, checksum=checksum)
+
+    # ── Block-based file transfer ────────────────────────────────────────────
+
+    @mcp.tool()
+    def remote_file_transfer_start(
+        filename: str, direction: str, size: int, block_size: int,
+        checksum: str, remote_id: str | None = None,
+    ) -> str:
+        """Start a block-based file transfer session on the remote machine.
+
+        Returns JSON with ``transfer_id`` and ``total_blocks``.
+        """
+        return _send(file_transfer_start, filename, direction, size,
+                     block_size, checksum, remote_id=remote_id)
+
+    @mcp.tool()
+    def remote_file_transfer_block(
+        transfer_id: str, block_num: int, data: str | None = None,
+        remote_id: str | None = None,
+    ) -> str:
+        """Send or receive a single block in an active transfer session.
+
+        For upload direction, provide base64-encoded ``data``.
+        Returns JSON with ``block_num``, ``total_blocks``, and ``status``.
+        """
+        return _send(file_transfer_block, transfer_id, block_num,
+                     data=data, remote_id=remote_id)
+
+    @mcp.tool()
+    def remote_file_transfer_end(
+        transfer_id: str, remote_id: str | None = None,
+    ) -> str:
+        """Finalize a transfer: verify checksum and commit the file.
+
+        Returns JSON with ``path``, ``size``, and ``verified``.
+        """
+        return _send(file_transfer_end, transfer_id, remote_id=remote_id)
+
+    @mcp.tool()
+    def remote_file_transfer_cancel(
+        transfer_id: str, remote_id: str | None = None,
+    ) -> str:
+        """Cancel an active transfer and clean up temp files.
+
+        Returns JSON with ``cancelled: true``.
+        """
+        return _send(file_transfer_cancel, transfer_id, remote_id=remote_id)
 
 
     # ── Agent ──────────────────────────────────────────────────────────────
