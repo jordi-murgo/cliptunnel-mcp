@@ -80,7 +80,7 @@ Chain strategy: stacked-to-main
 
 ## Phase 2: Core Implementation — Op Handlers
 
-- [ ] 2.1 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.start` op via `dispatch()`. New test class `TestFileTransferStart`:
+- [x] 2.1 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.start` op via `dispatch()`. New test class `TestFileTransferStart`:
   - (a) `test_start_upload_success` — `dispatch(json.dumps({"op":"file.transfer.start","direction":"upload","filename":"/tmp/x.bin","size":65536,"block_size":65536,"checksum":"abc"}))` returns `({"transfer_id":"...","total_blocks":1}, False)`; parse JSON, assert `transfer_id` is a string, `total_blocks == 1`
   - (b) `test_start_download_success` — create a real temp file, dispatch with `direction:"download"`, assert `total_blocks` matches real file size / block_size
   - (c) `test_start_download_size_hint_ignored` — create a 100KB file, send `size: 999` (wrong hint), assert `total_blocks` computed from real `os.path.getsize()`, not 999
@@ -94,7 +94,7 @@ Chain strategy: stacked-to-main
   - Depends on: 1.4 (TransferSessionManager exists for test imports)
   - Verify: `python -m unittest tests.test_operations.TestFileTransferStart -v` (8 tests fail)
 
-- [ ] 2.2 **GREEN**: Implement `op_file_transfer_start(req)` in `src/cliptunnel_mcp/operations.py`:
+- [x] 2.2 **GREEN**: Implement `op_file_transfer_start(req)` in `src/cliptunnel_mcp/operations.py`:
   - Parse `direction`, `filename`, `size`, `block_size`, `checksum` from `req`; validate each required field (return `(f"missing '{field}' field", True)` if absent)
   - Validate `direction` is `"upload"` or `"download"`
   - Validate `block_size` against `_platform_safe_max_block_size()` (import from `transfer_session.py`)
@@ -106,7 +106,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.1
   - Verify: `python -m unittest tests.test_operations.TestFileTransferStart -v` (all pass)
 
-- [ ] 2.3 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.block` op. New test class `TestFileTransferBlock`:
+- [x] 2.3 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.block` op. New test class `TestFileTransferBlock`:
   - (a) `test_block_upload_success` — start a session, dispatch `file.transfer.block` with `transfer_id`, `block_num: 0`, `data: base64.b64encode(b"hello")`, assert response JSON `{"block_num":0, "total_blocks":N, "status":"ok"}`, `is_error=False`
   - (b) `test_block_download_success` — start a download session for a real file, dispatch `file.transfer.block` with `transfer_id`, `block_num: 0` (no `data` field), assert response JSON has `block_num`, `data` (base64 string), `total_blocks`, `status:"ok"`, `is_error=False`
   - (c) `test_block_invalid_transfer_id` — `transfer_id:"nonexistent"`, assert error "invalid or expired", `is_error=True`
@@ -122,7 +122,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.2 (op_file_transfer_start works so tests can create sessions)
   - Verify: `python -m unittest tests.test_operations.TestFileTransferBlock -v` (10 tests fail)
 
-- [ ] 2.4 **GREEN**: Implement `op_file_transfer_block(req)` in `src/cliptunnel_mcp/operations.py`:
+- [x] 2.4 **GREEN**: Implement `op_file_transfer_block(req)` in `src/cliptunnel_mcp/operations.py`:
   - Parse `transfer_id`, `block_num`; validate presence
   - Get session via `_transfer_sessions.get_session(transfer_id)`; if None → `("transfer_id invalid or expired", True)`
   - If `direction == "upload"`: parse `data` (base64); validate presence; `base64.b64decode(data, validate=True)`; call `_transfer_sessions.append_block(tid, block_num, decoded)`; on `ValueError` return `(str(exc), True)` with appropriate messages ("out of order", "duplicate block_num", "exceeds total_blocks")
@@ -133,7 +133,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.3
   - Verify: `python -m unittest tests.test_operations.TestFileTransferBlock -v` (all pass)
 
-- [ ] 2.5 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.end` op. New test class `TestFileTransferEnd`:
+- [x] 2.5 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.end` op. New test class `TestFileTransferEnd`:
   - (a) `test_end_upload_success_matching_checksum` — start upload session, send all blocks with correct data, dispatch `file.transfer.end`, assert response JSON `{"path":"...","size":N,"verified":true}`, `is_error=False`; verify final file exists with correct content; temp file gone
   - (b) `test_end_upload_checksum_mismatch` — send blocks with wrong data, dispatch end, assert response JSON `{"verified":false}`, `is_error=False`; final path does NOT exist; temp file retained
   - (c) `test_end_download_success` — start download session for real file, dispatch end, assert response JSON `{"path":"...","size":N,"verified":true}`, `is_error=False`
@@ -145,7 +145,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.4 (block op works so tests can populate blocks)
   - Verify: `python -m unittest tests.test_operations.TestFileTransferEnd -v` (6 tests fail)
 
-- [ ] 2.6 **GREEN**: Implement `op_file_transfer_end(req)` in `src/cliptunnel_mcp/operations.py`:
+- [x] 2.6 **GREEN**: Implement `op_file_transfer_end(req)` in `src/cliptunnel_mcp/operations.py`:
   - Parse `transfer_id`; validate presence
   - Get session; if None → `("transfer_id invalid or expired", True)`
   - If `direction == "upload"`: call `_transfer_sessions.finalize_upload(tid)`; on `ValueError` ("not all blocks received") return `(str(exc), True)`; on success return `(json.dumps({"path": path, "size": size, "verified": verified}), False)`; on `verified=False` return `(json.dumps({"verified": False}), False)`
@@ -155,7 +155,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.5
   - Verify: `python -m unittest tests.test_operations.TestFileTransferEnd -v` (all pass)
 
-- [ ] 2.7 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.cancel` op. New test class `TestFileTransferCancel`:
+- [x] 2.7 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer.cancel` op. New test class `TestFileTransferCancel`:
   - (a) `test_cancel_during_upload` — start upload session, send 3 of 10 blocks, dispatch `file.transfer.cancel`, assert response JSON `{"cancelled":true}`, `is_error=False`; verify temp file deleted; subsequent block op returns "invalid or expired"
   - (b) `test_cancel_during_download` — start download session, dispatch cancel, assert `{"cancelled":true}`, `is_error=False`; session gone
   - (c) `test_cancel_invalid_transfer_id` — `transfer_id:"nonexistent"`, assert error "invalid or expired", `is_error=True`
@@ -166,7 +166,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.6 (end op works so test (d) can complete a transfer first)
   - Verify: `python -m unittest tests.test_operations.TestFileTransferCancel -v` (5 tests fail)
 
-- [ ] 2.8 **GREEN**: Implement `op_file_transfer_cancel(req)` in `src/cliptunnel_mcp/operations.py`:
+- [x] 2.8 **GREEN**: Implement `op_file_transfer_cancel(req)` in `src/cliptunnel_mcp/operations.py`:
   - Parse `transfer_id`; validate presence
   - Call `_transfer_sessions.cancel(tid)`; if `True` → `(json.dumps({"cancelled": True}), False)`; if `False` → `("transfer_id invalid or expired", True)`
   - Run: `python -m unittest tests.test_operations.TestFileTransferCancel -v` — all pass.
@@ -174,7 +174,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.7
   - Verify: `python -m unittest tests.test_operations.TestFileTransferCancel -v` (all pass)
 
-- [ ] 2.9 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer` session timeout. New test class `TestTransferSessionTimeout`:
+- [x] 2.9 **RED**: Write failing tests in `tests/test_operations.py` for `file.transfer` session timeout. New test class `TestTransferSessionTimeout`:
   - (a) `test_session_timeout_auto_cleanup` — create `TransferSessionManager(timeout_secs=0.5)` via direct instantiation in test, create upload session, append 1 block, sleep 1.5s, assert `get_session(tid)` returns `None`; assert temp file deleted; dispatch block op with that `transfer_id` → "invalid or expired"
   - (b) `test_session_timeout_after_no_activity` — create session, append blocks, then wait; session still alive while within timeout; after timeout, session expired
   - Run: `python -m unittest tests.test_operations.TestTransferSessionTimeout -v` — fail.
@@ -182,12 +182,12 @@ Chain strategy: stacked-to-main
   - Depends on: 2.8
   - Verify: `python -m unittest tests.test_operations.TestTransferSessionTimeout -v` (2 tests fail)
 
-- [ ] 2.10 **GREEN**: Verify timeout sweep works end-to-end. The `TransferSessionManager` from 1.4 already implements the sweep thread; this task ensures the op handlers' lazy singleton uses the config timeout and that the sweep correctly cleans up. If the singleton needs a configurable timeout, update `op_file_transfer_start` to read `CLIPTUNNEL_TRANSFER_TIMEOUT_SECS` via `config.get_env` when initializing the singleton. Run: `python -m unittest tests.test_operations.TestTransferSessionTimeout -v` — all pass.
+- [x] 2.10 **GREEN**: Verify timeout sweep works end-to-end. The `TransferSessionManager` from 1.4 already implements the sweep thread; this task ensures the op handlers' lazy singleton uses the config timeout and that the sweep correctly cleans up. If the singleton needs a configurable timeout, update `op_file_transfer_start` to read `CLIPTUNNEL_TRANSFER_TIMEOUT_SECS` via `config.get_env` when initializing the singleton. Run: `python -m unittest tests.test_operations.TestTransferSessionTimeout -v` — all pass.
   - Files: `src/cliptunnel_mcp/operations.py` (if timeout config wiring needed)
   - Depends on: 2.9
   - Verify: `python -m unittest tests.test_operations.TestTransferSessionTimeout -v` (all pass)
 
-- [ ] 2.11 **RED**: Write backward-compatibility tests in `tests/test_operations.py` — new test class `TestTransferBackwardCompat`:
+- [x] 2.11 **RED**: Write backward-compatibility tests in `tests/test_operations.py` — new test class `TestTransferBackwardCompat`:
   - (a) `test_fs_bin_write_still_works` — dispatch `fs.bin_write`, assert unchanged behavior
   - (b) `test_fs_bin_read_still_works` — dispatch `fs.bin_read`, assert unchanged behavior
   - (c) `test_all_existing_ops_still_registered` — assert `registry.op_names()` includes all original ops AND the four new `file.transfer.*` ops
@@ -196,7 +196,7 @@ Chain strategy: stacked-to-main
   - Depends on: 2.10
   - Verify: `python -m unittest tests.test_operations.TestTransferBackwardCompat -v` (test (c) fails)
 
-- [ ] 2.12 **GREEN**: Register the four new ops in `register_builtins()` in `src/cliptunnel_mcp/plugins.py`:
+- [x] 2.12 **GREEN**: Register the four new ops in `register_builtins()` in `src/cliptunnel_mcp/plugins.py`:
   - Add: `reg.register_op("file.transfer.start", operations.op_file_transfer_start)`, `reg.register_op("file.transfer.block", operations.op_file_transfer_block)`, `reg.register_op("file.transfer.end", operations.op_file_transfer_end)`, `reg.register_op("file.transfer.cancel", operations.op_file_transfer_cancel)`
   - Run: `python -m unittest tests.test_operations.TestTransferBackwardCompat -v` — all pass. Then run full operations suite: `python -m unittest tests.test_operations -v` — all pass.
   - Files: `src/cliptunnel_mcp/plugins.py`

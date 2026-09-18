@@ -107,7 +107,7 @@ class TestTransferSessionManager(unittest.TestCase):
         self._manager = TransferSessionManager()
         filename = os.path.join(self._tmp.name, "upload.bin")
         tid, _ = self._manager.create_session(
-            "upload", filename, size=1048576, block_size=65536, checksum="abc",
+            "upload", filename, size=5 * 65536, block_size=65536, checksum="abc",
         )
         self._manager.append_block(tid, 0, b"data")
         with self.assertRaises(ValueError) as ctx:

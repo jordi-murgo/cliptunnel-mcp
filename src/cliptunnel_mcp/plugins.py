@@ -449,6 +449,10 @@ def register_builtins(reg: ExtensionRegistry) -> None:
     reg.register_op("sysinfo", operations.op_sysinfo)
     reg.register_op("register", operations.op_sysinfo)
     reg.register_op("agent", operations.op_agent)
+    reg.register_op("file.transfer.start", operations.op_file_transfer_start)
+    reg.register_op("file.transfer.block", operations.op_file_transfer_block)
+    reg.register_op("file.transfer.end", operations.op_file_transfer_end)
+    reg.register_op("file.transfer.cancel", operations.op_file_transfer_cancel)
 
     # ── MCP tools ──────────────────────────────────────────────────────
     from cliptunnel_mcp import server

@@ -135,12 +135,12 @@ class TransferSessionManager:
             session = self._sessions.get(transfer_id)
             if session is None:
                 raise ValueError("transfer_id invalid or expired")
+            if block_num < session.received_blocks:
+                raise ValueError(f"duplicate block_num {block_num}")
             if block_num >= session.total_blocks:
                 raise ValueError(
                     f"block_num {block_num} exceeds total_blocks {session.total_blocks}"
                 )
-            if block_num < session.received_blocks:
-                raise ValueError(f"duplicate block_num {block_num}")
             if block_num > session.received_blocks:
                 raise ValueError(
                     f"block_num {block_num} out of order (expected {session.received_blocks})"

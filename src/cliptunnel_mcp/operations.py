@@ -742,3 +742,179 @@ def op_agent(req: dict) -> tuple[str, bool]:
         }), False)
 
     return (f"unknown agent action: {action}", True)
+
+
+# ── file.transfer.start ─────────────────────────────────────────────────────
+
+_transfer_sessions: "TransferSessionManager | None" = None
+
+
+def _get_transfer_sessions() -> "TransferSessionManager":
+    """Lazy-init module-level singleton for transfer sessions."""
+    global _transfer_sessions
+    if _transfer_sessions is None:
+        from cliptunnel_mcp.transfer_session import TransferSessionManager
+        from cliptunnel_mcp import config
+        timeout_str = config.get_env("CLIPTUNNEL_TRANSFER_TIMEOUT_SECS", "60")
+        try:
+            timeout_secs = float(timeout_str)
+        except (ValueError, TypeError):
+            timeout_secs = 60.0
+        _transfer_sessions = TransferSessionManager(timeout_secs=timeout_secs)
+    return _transfer_sessions
+
+
+def op_file_transfer_start(req: dict) -> tuple[str, bool]:
+    """Start a block-based file transfer session.
+
+    Request: direction, filename, size, block_size, checksum.
+    Response: {"transfer_id": "...", "total_blocks": N} or error string.
+    """
+    direction = req.get("direction")
+    if not direction:
+        return ("missing 'direction' field", True)
+    filename = req.get("filename")
+    if not filename:
+        return ("missing 'filename' field", True)
+    if "size" not in req:
+        return ("missing 'size' field", True)
+    size = req["size"]
+    if "block_size" not in req:
+        return ("missing 'block_size' field", True)
+    block_size = req["block_size"]
+    checksum = req.get("checksum", "")
+
+    if direction not in ("upload", "download"):
+        return (
+            f"direction must be 'upload' or 'download', got: {direction!r}",
+            True,
+        )
+
+    mgr = _get_transfer_sessions()
+    try:
+        tid, total_blocks = mgr.create_session(
+            direction, filename, size=size, block_size=block_size, checksum=checksum,
+        )
+    except ValueError as exc:
+        return (str(exc), True)
+
+    return (
+        json.dumps({"transfer_id": tid, "total_blocks": total_blocks}),
+        False,
+    )
+
+
+# ── file.transfer.block ─────────────────────────────────────────────────────
+
+
+def op_file_transfer_block(req: dict) -> tuple[str, bool]:
+    """Send or receive a single block in an active transfer session.
+
+    For upload: request includes data (base64); agent appends to temp file.
+    For download: request has no data; agent reads from remote file and returns base64.
+    """
+    transfer_id = req.get("transfer_id")
+    if not transfer_id:
+        return ("missing 'transfer_id' field", True)
+    if "block_num" not in req:
+        return ("missing 'block_num' field", True)
+    block_num = req["block_num"]
+
+    mgr = _get_transfer_sessions()
+    session = mgr.get_session(transfer_id)
+    if session is None:
+        return ("transfer_id invalid or expired", True)
+
+    if session.direction == "upload":
+        data_b64 = req.get("data")
+        if data_b64 is None:
+            return ("missing 'data' field", True)
+        try:
+            decoded = base64.b64decode(data_b64, validate=True)
+        except Exception as exc:
+            return (f"invalid base64: {exc}", True)
+        try:
+            mgr.append_block(transfer_id, block_num, decoded)
+        except ValueError as exc:
+            return (str(exc), True)
+        return (
+            json.dumps({
+                "block_num": block_num,
+                "total_blocks": session.total_blocks,
+                "status": "ok",
+            }),
+            False,
+        )
+
+    # download direction
+    try:
+        block_data = mgr.read_block(transfer_id, block_num)
+    except ValueError as exc:
+        return (str(exc), True)
+    return (
+        json.dumps({
+            "block_num": block_num,
+            "data": base64.b64encode(block_data).decode("ascii"),
+            "total_blocks": session.total_blocks,
+            "status": "ok",
+        }),
+        False,
+    )
+
+
+# ── file.transfer.end ───────────────────────────────────────────────────────
+
+
+def op_file_transfer_end(req: dict) -> tuple[str, bool]:
+    """Finalize a transfer: verify checksum and commit the file (upload),
+    or clean up session state (download).
+    """
+    transfer_id = req.get("transfer_id")
+    if not transfer_id:
+        return ("missing 'transfer_id' field", True)
+
+    mgr = _get_transfer_sessions()
+    session = mgr.get_session(transfer_id)
+    if session is None:
+        return ("transfer_id invalid or expired", True)
+
+    if session.direction == "upload":
+        try:
+            path, size, verified = mgr.finalize_upload(transfer_id)
+        except ValueError as exc:
+            return (str(exc), True)
+        if verified:
+            return (
+                json.dumps({"path": path, "size": size, "verified": True}),
+                False,
+            )
+        else:
+            return (
+                json.dumps({"verified": False}),
+                False,
+            )
+
+    # download direction
+    try:
+        path, size = mgr.finalize_download(transfer_id)
+    except ValueError as exc:
+        return (str(exc), True)
+    return (
+        json.dumps({"path": path, "size": size, "verified": True}),
+        False,
+    )
+
+
+# ── file.transfer.cancel ────────────────────────────────────────────────────
+
+
+def op_file_transfer_cancel(req: dict) -> tuple[str, bool]:
+    """Cancel an active transfer and clean up temp files."""
+    transfer_id = req.get("transfer_id")
+    if not transfer_id:
+        return ("missing 'transfer_id' field", True)
+
+    mgr = _get_transfer_sessions()
+    if mgr.cancel(transfer_id):
+        return (json.dumps({"cancelled": True}), False)
+    return ("transfer_id invalid or expired", True)
