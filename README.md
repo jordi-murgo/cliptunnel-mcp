@@ -235,8 +235,19 @@ The server exposes **27 tools** over stdio. Most tools accept an optional `remot
 
 | Tool | Description |
 |------|-------------|
-| `remote_upload` | Upload a local file to a remote machine. |
-| `remote_download` | Download a remote file to the local machine. |
+| `remote_upload` | Upload a local file to a remote machine using block-based transfer. |
+| `remote_download` | Download a remote file to the local machine using block-based transfer. |
+
+### Block file transfer
+
+| Tool | Description |
+|------|-------------|
+| `remote_file_transfer_start` | Start a transfer session (upload or download). |
+| `remote_file_transfer_block` | Send (upload) or fetch (download) a single block. |
+| `remote_file_transfer_end` | Finalize a transfer: verify checksum and commit the file. |
+| `remote_file_transfer_cancel` | Cancel a transfer at any point and clean up. |
+
+`remote_upload` and `remote_download` use a block protocol (like XMODEM): the file is split into fixed-size blocks (default 64 KB, configurable via `CLIPTUNNEL_BLOCK_SIZE`) and each block travels as a normal command/response exchange, reusing the existing ACK/retransmission infrastructure. Progress is reported per block (`block_num/total_blocks`), transfers can be cancelled mid-flight, and the agent verifies a SHA-256 checksum before atomically committing the file. This lifts the single-slot transport limit (e.g. the ~4 MB Windows clipboard) and works on every transport. The four individual tools allow manual orchestration of a transfer session.
 
 ### System info
 
@@ -282,6 +293,10 @@ The `dispatch` handler supports these operations:
 | `fs.find` | `path`, `pattern` | JSON: `[PATH, ...]` (glob) |
 | `fs.bin_read` | `path` | JSON: `{path, size, b64}` |
 | `fs.bin_write` | `path`, `b64` | `wrote N bytes to PATH` |
+| `file.transfer.start` | `direction`, `filename`, `size`, `block_size`, `checksum` | JSON: `{transfer_id, total_blocks}` |
+| `file.transfer.block` | `transfer_id`, `block_num`, `data` (upload) | JSON: `{block_num, status}` or `{data}` (download) |
+| `file.transfer.end` | `transfer_id` | JSON: `{path, size, verified}` |
+| `file.transfer.cancel` | `transfer_id` | JSON: `{cancelled: true}` |
 | `sysinfo` | — | JSON: full system info |
 | `register` | — | JSON: sysinfo (alias for agent registration) |
 | `agent` | `action`, ... | JSON: session management (start, continue, result, status, clear, end, list, login, login_status) |
