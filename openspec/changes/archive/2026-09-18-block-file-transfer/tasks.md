@@ -299,28 +299,28 @@ Chain strategy: stacked-to-main
 
 ## Phase 5: Full Verification and Cleanup
 
-- [ ] 5.1 Run the complete test suite to verify no regressions: `python -m unittest discover -s tests -t . -v`. All tests must pass — existing tests (shell, fs, agent, transport, protocol, etc.) and all new tests (transfer_session, operations transfer ops, server transfer tools, plugins).
+- [x] 5.1 Run the complete test suite to verify no regressions: `python -m unittest discover -s tests -t . -v`. All tests must pass — existing tests (shell, fs, agent, transport, protocol, etc.) and all new tests (transfer_session, operations transfer ops, server transfer tools, plugins).
   - Files: no file changes
   - Depends on: 4.2
   - Verify: `python -m unittest discover -s tests -t . -v` (zero failures)
 
-- [ ] 5.2 **REFACTOR**: Review the implementation for shared block-loop logic between `upload()` and `download()` in `server.py`. If there is duplicated block-iteration code, extract a shared helper (e.g., `_block_transfer_loop(transfer_id, total_blocks, remote_id, block_sender)`) to reduce duplication. Ensure the refactor does not break any tests. Run: `python -m unittest discover -s tests -t . -v` — all pass.
+- [x] 5.2 **REFACTOR**: Review the implementation for shared block-loop logic between `upload()` and `download()` in `server.py`. If there is duplicated block-iteration code, extract a shared helper (e.g., `_block_transfer_loop(transfer_id, total_blocks, remote_id, block_sender)`) to reduce duplication. Ensure the refactor does not break any tests. Run: `python -m unittest discover -s tests -t . -v` — all pass.
   - Files: `src/cliptunnel_mcp/server.py`
   - Depends on: 5.1
   - Verify: `python -m unittest discover -s tests -t . -v` (zero failures)
   - Commit: `refactor(transfer): extract shared block-loop helper in upload/download`
 
-- [ ] 5.3 Verify backward compatibility explicitly: confirm `fs.bin_write` / `fs.bin_read` ops and `remote_fs_bin_write` / `remote_fs_bin_read` MCP tools work unchanged alongside the new block transfer ops. The existing `test_upload_download_roundtrip` test in `TestFsTools` must still pass (it tests the old single-shot path via `fs.bin_write`/`fs.bin_read`). If `upload()`/`download()` refactor broke this test, update it to use the new block protocol path while keeping the `fs.bin_write`/`fs.bin_read` direct tests intact.
+- [x] 5.3 Verify backward compatibility explicitly: confirm `fs.bin_write` / `fs.bin_read` ops and `remote_fs_bin_write` / `remote_fs_bin_read` MCP tools work unchanged alongside the new block transfer ops. The existing `test_upload_download_roundtrip` test in `TestFsTools` must still pass (it tests the old single-shot path via `fs.bin_write`/`fs.bin_read`). If `upload()`/`download()` refactor broke this test, update it to use the new block protocol path while keeping the `fs.bin_write`/`fs.bin_read` direct tests intact.
   - Files: `tests/test_server.py` (if the existing roundtrip test needs adjustment for the refactored upload/download)
   - Depends on: 5.2
   - Verify: `python -m unittest tests.test_server.TestFsTools -v` (all pass)
 
-- [ ] 5.4 Verify the `TestToolSurface.test_registered_tool_names` test passes with the updated `EXPECTED_TOOLS` set. All 31 tools (27 existing + 4 new) must be registered.
+- [x] 5.4 Verify the `TestToolSurface.test_registered_tool_names` test passes with the updated `EXPECTED_TOOLS` set. All 31 tools (27 existing + 4 new) must be registered.
   - Files: no changes (verification only)
   - Depends on: 5.3
   - Verify: `python -m unittest tests.test_server.TestToolSurface -v` (all pass)
 
-- [ ] 5.5 **Final commit**: If any remaining changes from refactor or test adjustments, commit as: `feat(transfer): complete block-based file transfer with upload/download refactor and full test coverage`. Run final verification: `python -m unittest discover -s tests -t . -v` — zero failures.
+- [x] 5.5 **Final commit**: If any remaining changes from refactor or test adjustments, commit as: `feat(transfer): complete block-based file transfer with upload/download refactor and full test coverage`. Run final verification: `python -m unittest discover -s tests -t . -v` — zero failures.
   - Files: any remaining
   - Depends on: 5.4
   - Verify: `python -m unittest discover -s tests -t . -v` (zero failures)
