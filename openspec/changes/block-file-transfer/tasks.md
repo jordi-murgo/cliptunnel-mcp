@@ -36,7 +36,7 @@ Chain strategy: stacked-to-main
   - Verify: `python -m unittest tests.test_config -v` (all pass)
   - Commit: `feat(config): add CLIPTUNNEL_BLOCK_SIZE and CLIPTUNNEL_TRANSFER_TIMEOUT_SECS to ENV_TO_FILE`
 
-- [ ] 1.3 **RED**: Create `tests/test_transfer_session.py` with failing unit tests for `TransferSessionManager` core API. Test class `TestTransferSessionManager` using `tempfile.TemporaryDirectory`:
+- [x] 1.3 **RED**: Create `tests/test_transfer_session.py` with failing unit tests for `TransferSessionManager` core API. Test class `TestTransferSessionManager` using `tempfile.TemporaryDirectory`:
   - (a) `test_create_session_upload` — `create_session("upload", filename, size=1048576, block_size=65536, checksum)` returns `(transfer_id, 16)`; `get_session(transfer_id)` returns a `TransferSession` with correct fields
   - (b) `test_create_session_download` — `create_session("download", ...)` with existing file returns `(transfer_id, total_blocks)`; for non-existent file raises/returns error
   - (c) `test_total_blocks_ceiling_division` — size=65537, block_size=65536 → total_blocks=2
@@ -59,7 +59,7 @@ Chain strategy: stacked-to-main
   - Depends on: nothing (tests define the contract)
   - Verify: `python -m unittest tests.test_transfer_session -v` (17 tests fail)
 
-- [ ] 1.4 **GREEN**: Create `src/cliptunnel_mcp/transfer_session.py` implementing `TransferSession` dataclass and `TransferSessionManager` class per the design's interface contract. Include:
+- [x] 1.4 **GREEN**: Create `src/cliptunnel_mcp/transfer_session.py` implementing `TransferSession` dataclass and `TransferSessionManager` class per the design's interface contract. Include:
   - `TransferSession` dataclass: `transfer_id`, `direction`, `filename`, `block_size`, `total_blocks`, `expected_checksum`, `temp_path`, `received_blocks=0`, `last_activity`
   - `TransferSessionManager.__init__`: `_sessions` dict, `threading.Lock`, timeout from config or default 60s, daemon sweep thread
   - `create_session(direction, filename, size, block_size, checksum)`: validate direction; for download verify file exists and compute real size via `os.path.getsize()` (ignore controller's `size` hint); for upload create temp file via `tempfile.NamedTemporaryFile(delete=False, dir=parent_of_final_path)`; compute `total_blocks = ceil(size / block_size)`; store session; return `(transfer_id, total_blocks)`
