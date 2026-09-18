@@ -447,6 +447,28 @@ def _resolve_block_size() -> int:
         return 65536
 
 
+def _parse_transfer_response(resp: str | None, transfer_id: str, remote_id: str | None) -> tuple[dict | None, str | None]:
+    """Parse a transfer op response, cancelling on unparseable/error.
+
+    Returns ``(parsed_dict, error_string)``. On success, ``error_string``
+    is ``None`` and ``parsed_dict`` contains the JSON. On failure,
+    ``parsed_dict`` is ``None`` and ``error_string`` is the response or
+    an error JSON string.
+    """
+    if resp is None:
+        file_transfer_cancel(transfer_id, remote_id=remote_id)
+        return None, json.dumps({"status": "error", "error": "no response from Agent"})
+    try:
+        parsed = json.loads(resp)
+    except json.JSONDecodeError:
+        file_transfer_cancel(transfer_id, remote_id=remote_id)
+        return None, resp
+    if parsed.get("is_error"):
+        file_transfer_cancel(transfer_id, remote_id=remote_id)
+        return None, resp
+    return parsed, None
+
+
 def upload(local_path: str, remote_path: str, remote_id: str | None = None) -> str | None:
     """Upload a local file via the block transfer protocol.
 
@@ -483,17 +505,9 @@ def upload(local_path: str, remote_path: str, remote_id: str | None = None) -> s
         block_resp = file_transfer_block(
             transfer_id, block_num, data=b64, remote_id=remote_id,
         )
-        if block_resp is None:
-            file_transfer_cancel(transfer_id, remote_id=remote_id)
-            return json.dumps({"status": "error", "error": "no response from Agent"})
-        try:
-            block = json.loads(block_resp)
-        except json.JSONDecodeError:
-            file_transfer_cancel(transfer_id, remote_id=remote_id)
-            return block_resp
-        if block.get("is_error"):
-            file_transfer_cancel(transfer_id, remote_id=remote_id)
-            return block_resp
+        _, err = _parse_transfer_response(block_resp, transfer_id, remote_id)
+        if err is not None:
+            return err
 
     # 3. End
     end_resp = file_transfer_end(transfer_id, remote_id=remote_id)
@@ -544,17 +558,9 @@ def download(remote_path: str, local_path: str, remote_id: str | None = None, ch
             block_resp = file_transfer_block(
                 transfer_id, block_num, data=None, remote_id=remote_id,
             )
-            if block_resp is None:
-                file_transfer_cancel(transfer_id, remote_id=remote_id)
-                return json.dumps({"status": "error", "error": "no response from Agent"})
-            try:
-                block = json.loads(block_resp)
-            except json.JSONDecodeError:
-                file_transfer_cancel(transfer_id, remote_id=remote_id)
-                return block_resp
-            if block.get("is_error"):
-                file_transfer_cancel(transfer_id, remote_id=remote_id)
-                return block_resp
+            block, err = _parse_transfer_response(block_resp, transfer_id, remote_id)
+            if err is not None:
+                return err
             chunk = base64.b64decode(block["data"])
             f.write(chunk)
 

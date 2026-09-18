@@ -288,9 +288,12 @@ class TestFsTools(ServerTestCase):
             with open(local, "wb") as f:
                 f.write(raw)
             out = self.call("remote_upload", local_path=local, remote_path=remote)
-            self.assertIn("wrote", out)
+            # upload() now uses block protocol and returns JSON with status:"ok"
+            upload_data = json.loads(out)
+            self.assertEqual(upload_data["status"], "ok")
             out = self.call("remote_download", remote_path=remote, local_path=back)
-            self.assertIn("downloaded", out)
+            download_data = json.loads(out)
+            self.assertEqual(download_data["status"], "ok")
             with open(back, "rb") as f:
                 self.assertEqual(f.read(), raw)
 
